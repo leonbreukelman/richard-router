@@ -38,8 +38,7 @@ cp .env.example .env
 cp config/router.example.yaml config/router.yaml
 # edit .env and add NVIDIA_API_KEY + OPENROUTER_API_KEY
 uv sync
-set -a; source .env; set +a
-uv run uvicorn richard_router.main:app --host 127.0.0.1 --port 4000
+uv run dotenv -f .env run -- uvicorn richard_router.main:app --host 127.0.0.1 --port 4000
 ```
 
 Smoke check:
@@ -129,8 +128,7 @@ uv run ruff check .
 Run a bounded live smoke using your local environment keys:
 
 ```bash
-set -a; source ~/.hermes/.env; set +a
-uv run python scripts/live_smoke.py --config config/router.example.yaml
+uv run dotenv -f ~/.hermes/.env run -- python scripts/live_smoke.py --config config/router.example.yaml
 ```
 
 The live smoke sends tiny prompts and prints only provider/model/upstream status,

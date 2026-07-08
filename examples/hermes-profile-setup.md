@@ -17,8 +17,7 @@ cp .env.example .env
 cp config/router.example.yaml config/router.yaml
 # add NVIDIA_API_KEY and OPENROUTER_API_KEY to .env
 uv sync
-set -a; source .env; set +a
-uv run uvicorn richard_router.main:app --host 127.0.0.1 --port 4000
+uv run dotenv -f .env run -- uvicorn richard_router.main:app --host 127.0.0.1 --port 4000
 ```
 
 Then smoke Hermes:
