@@ -1,0 +1,12 @@
+services:
+  richard-router:
+    build: .
+    image: richard-router:local
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    environment:
+      ROUTER_CONFIG: /app/config/router.yaml
+    volumes:
+      - ./config/router.yaml:/app/config/router.yaml:ro

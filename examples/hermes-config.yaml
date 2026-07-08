@@ -1,0 +1,12 @@
+custom_providers:
+  - name: richard-router
+    base_url: http://127.0.0.1:4000/v1
+    api_mode: chat_completions
+    discover_models: false
+    models:
+      coding:
+        context_length: 128000
+
+model:
+  provider: custom:richard-router
+  default: coding

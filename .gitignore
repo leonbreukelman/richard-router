@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets/config
+.env
+.env.*
+!.env.example
+config/router.yaml
+config/*.local.yaml
+
+# Runtime artifacts and local review logs
+reports/
+*.log
+.DS_Store
