@@ -164,4 +164,9 @@ Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: added s
 
 ## Phase 2 PR/API ledger
 
-Pending push/PR/CI/merge.
+- PR: https://github.com/leonbreukelman/richard-router/pull/6
+- Implementation commit: `1225ca88f3990251e49f37ee6bded80ded5ae8d4`
+- Merge commit: `e03ab57815e8ef44905e7bc05607b9cd988019c4`
+- PR-head CI check-run read through API: `uv / ruff / pytest` -> `completed/success`
+- Post-merge push-to-`main` CI check-run read through API: `uv / ruff / pytest` -> `completed/success`
+- Final PR ledger comment: https://github.com/leonbreukelman/richard-router/pull/6#issuecomment-4925853539
