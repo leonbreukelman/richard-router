@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,6 +13,7 @@ from richard_router.errors import classify_exception, classify_status
 from richard_router.redaction import redact
 
 ClientFactory = Callable[[Upstream], httpx.AsyncClient]
+Clock = Callable[[], float]
 ClientCacheKey = tuple[str, str, str]
 
 
@@ -48,6 +50,13 @@ class RouterStream:
     headers: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class CircuitBreakerState:
+    consecutive_failures: int = 0
+    opened_at: float | None = None
+    half_open_probes: int = 0
+
+
 def default_client_factory(upstream: Upstream) -> httpx.AsyncClient:
     timeout = httpx.Timeout(
         connect=upstream.connect_timeout_seconds,
@@ -59,10 +68,17 @@ def default_client_factory(upstream: Upstream) -> httpx.AsyncClient:
 
 
 class RichardRouter:
-    def __init__(self, config: RouterConfig, client_factory: ClientFactory | None = None):
+    def __init__(
+        self,
+        config: RouterConfig,
+        client_factory: ClientFactory | None = None,
+        clock: Clock | None = None,
+    ):
         self.config = config
         self.client_factory = client_factory or default_client_factory
+        self.clock = clock or time.monotonic
         self._clients: dict[ClientCacheKey, httpx.AsyncClient] = {}
+        self._circuit_breakers: dict[ClientCacheKey, CircuitBreakerState] = {}
 
     @staticmethod
     def _client_cache_key(upstream: Upstream) -> ClientCacheKey:
@@ -75,6 +91,51 @@ class RichardRouter:
             client = self.client_factory(upstream)
             self._clients[cache_key] = client
         return client
+
+    def _circuit_breaker_state(self, upstream: Upstream) -> CircuitBreakerState:
+        cache_key = self._client_cache_key(upstream)
+        state = self._circuit_breakers.get(cache_key)
+        if state is None:
+            state = CircuitBreakerState()
+            self._circuit_breakers[cache_key] = state
+        return state
+
+    def _circuit_open_attempt(self, upstream: Upstream) -> Attempt | None:
+        cfg = self.config.failover.circuit_breaker
+        if not cfg.enabled:
+            return None
+        state = self._circuit_breaker_state(upstream)
+        if state.opened_at is None:
+            return None
+        if self.clock() - state.opened_at < cfg.cooldown_seconds:
+            return Attempt(upstream.name, "circuit_open")
+        if state.half_open_probes >= cfg.half_open_max_probes:
+            return Attempt(upstream.name, "circuit_open")
+        state.half_open_probes += 1
+        return None
+
+    def _record_upstream_success(self, upstream: Upstream) -> None:
+        if not self.config.failover.circuit_breaker.enabled:
+            return
+        state = self._circuit_breaker_state(upstream)
+        state.consecutive_failures = 0
+        state.opened_at = None
+        state.half_open_probes = 0
+
+    def _record_retryable_failure(self, upstream: Upstream) -> None:
+        cfg = self.config.failover.circuit_breaker
+        if not cfg.enabled:
+            return
+        state = self._circuit_breaker_state(upstream)
+        if state.opened_at is not None:
+            state.consecutive_failures = cfg.failure_threshold
+            state.opened_at = self.clock()
+            state.half_open_probes = 0
+            return
+        state.consecutive_failures += 1
+        if state.consecutive_failures >= cfg.failure_threshold:
+            state.opened_at = self.clock()
+            state.half_open_probes = 0
 
     async def aclose(self) -> None:
         clients = list(self._clients.values())
@@ -135,6 +196,10 @@ class RichardRouter:
         retryable_status = set(self.config.failover.retry_on_status)
         return classify_status(status_code, retryable_status) == "retryable"
 
+    @staticmethod
+    def _retryable_exception(exc: Exception) -> bool:
+        return classify_exception(exc) == "retryable"
+
     def _diagnostic_headers(self, upstream: Upstream) -> dict[str, str]:
         if not self.config.observability.expose_upstream_header:
             return {}
@@ -149,6 +214,10 @@ class RichardRouter:
         attempts: list[Attempt] = []
         for upstream in virtual.upstreams:
             for _ in range(self.config.failover.max_attempts_per_upstream):
+                circuit_attempt = self._circuit_open_attempt(upstream)
+                if circuit_attempt is not None:
+                    attempts.append(circuit_attempt)
+                    break
                 client = self._client_for(upstream)
                 try:
                     response = await client.post(
@@ -158,6 +227,7 @@ class RichardRouter:
                     )
                     content = response.content
                     if 200 <= response.status_code < 300:
+                        self._record_upstream_success(upstream)
                         rewritten, media_type = self._rewrite_response_model(content, virtual.name)
                         return RouterResult(
                             status_code=response.status_code,
@@ -167,7 +237,9 @@ class RichardRouter:
                         )
                     attempts.append(Attempt(upstream.name, "http_error", response.status_code))
                     if self._retryable_status(response.status_code):
+                        self._record_retryable_failure(upstream)
                         continue
+                    self._record_upstream_success(upstream)
                     return RouterResult(
                         status_code=response.status_code,
                         content=content,
@@ -175,15 +247,19 @@ class RichardRouter:
                         headers=self._diagnostic_headers(upstream),
                     )
                 except httpx.TimeoutException as exc:
+                    if self._retryable_exception(exc):
+                        self._record_retryable_failure(upstream)
                     attempts.append(
                         Attempt(upstream.name, "timeout", error_type="TimeoutException")
                     )
                     if (
-                        classify_exception(exc) == "fatal"
+                        not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_timeout
                     ):
                         return self._all_failed(attempts)
                 except httpx.TransportError as exc:
+                    if self._retryable_exception(exc):
+                        self._record_retryable_failure(upstream)
                     attempts.append(
                         Attempt(
                             upstream.name,
@@ -192,7 +268,7 @@ class RichardRouter:
                         )
                     )
                     if (
-                        classify_exception(exc) == "fatal"
+                        not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_connection_error
                     ):
                         return self._all_failed(attempts)
@@ -220,6 +296,10 @@ class RichardRouter:
         attempts: list[Attempt] = []
         for upstream in virtual.upstreams:
             for _ in range(self.config.failover.max_attempts_per_upstream):
+                circuit_attempt = self._circuit_open_attempt(upstream)
+                if circuit_attempt is not None:
+                    attempts.append(circuit_attempt)
+                    break
                 client = self._client_for(upstream)
                 stream_cm = client.stream(
                     "POST",
@@ -232,6 +312,7 @@ class RichardRouter:
                     response = await stream_cm.__aenter__()
                     stream_entered = True
                     if 200 <= response.status_code < 300:
+                        self._record_upstream_success(upstream)
                         media_type = self._content_type(response, "text/event-stream")
                         iterator = self._stream_iterator(response, stream_cm, virtual.name)
                         return RouterStream(
@@ -245,7 +326,9 @@ class RichardRouter:
                     stream_entered = False
                     attempts.append(Attempt(upstream.name, "http_error", response.status_code))
                     if self._retryable_status(response.status_code):
+                        self._record_retryable_failure(upstream)
                         continue
+                    self._record_upstream_success(upstream)
                     return RouterResult(
                         status_code=response.status_code,
                         content=content,
@@ -255,17 +338,21 @@ class RichardRouter:
                 except httpx.TimeoutException as exc:
                     if stream_entered:
                         await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                    if self._retryable_exception(exc):
+                        self._record_retryable_failure(upstream)
                     attempts.append(
                         Attempt(upstream.name, "timeout", error_type="TimeoutException")
                     )
                     if (
-                        classify_exception(exc) == "fatal"
+                        not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_timeout
                     ):
                         return self._all_failed(attempts)
                 except httpx.TransportError as exc:
                     if stream_entered:
                         await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                    if self._retryable_exception(exc):
+                        self._record_retryable_failure(upstream)
                     attempts.append(
                         Attempt(
                             upstream.name,
@@ -274,7 +361,7 @@ class RichardRouter:
                         )
                     )
                     if (
-                        classify_exception(exc) == "fatal"
+                        not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_connection_error
                     ):
                         return self._all_failed(attempts)

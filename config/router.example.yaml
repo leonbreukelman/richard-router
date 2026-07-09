@@ -24,6 +24,11 @@ failover:
   retry_on_timeout: true
   retry_on_connection_error: true
   max_attempts_per_upstream: 1
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    cooldown_seconds: 30
+    half_open_max_probes: 1
 
 observability:
   # Keep false for normal Hermes use so the abstraction does not leak upstream names.

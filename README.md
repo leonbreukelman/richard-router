@@ -97,6 +97,11 @@ It does not fail over on normal caller/configuration errors like:
 That keeps real configuration problems visible instead of hiding them behind a
 fallback.
 
+The circuit breaker is enabled by default. Retryable upstream failures open a
+provider/model circuit after five consecutive failures, skip it for 30 seconds,
+then allow one half-open probe. A successful probe closes the circuit again.
+Caller/configuration errors such as 400/401/403/422 do not open the breaker.
+
 ## Streaming
 
 Streaming requests are passed through. Failover can happen before the upstream
