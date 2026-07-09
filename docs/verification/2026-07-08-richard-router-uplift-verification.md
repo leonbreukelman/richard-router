@@ -269,4 +269,14 @@ Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: decisio
 
 ## Phase 4 PR/API ledger
 
-Pending push/PR/CI/merge.
+- PR: https://github.com/leonbreukelman/richard-router/pull/10
+- Implementation commit: `5b8c49d4438937926d66f122d71357aecc6143ca`
+- Merge commit: `334162049314f3765833267a8d6688be1e0a12f8`
+- Changed files read from GitHub: `README.md`, `config/router.example.yaml`, `docs/decisions/2026-07-09-decision-log-boundary.md`, `docs/status/2026-07-08-richard-router-uplift-status.md`, `docs/verification/2026-07-08-richard-router-uplift-verification.md`, `docs/verification/2026-07-09-phase4-opus-review.json`, `richard_router/config.py`, `richard_router/service.py`, `tests/test_config.py`, `tests/test_decision_log.py`.
+- PR-head CI check-runs read through API:
+  - `uv / ruff / pytest` -> `completed/success`
+  - `copilot-pull-request-reviewer` -> `completed/success`
+- Post-merge push-to-`main` CI check-run read through API: `uv / ruff / pytest` -> `completed/success`
+- Local post-merge gate: `uv sync --all-groups && uv run ruff check . && uv run pytest -v` -> Ruff passed; Pytest `46 passed, 1 warning in 0.17s`.
+- Final PR ledger comment: https://github.com/leonbreukelman/richard-router/pull/10#issuecomment-4928437831
+- Branch cleanup: `phase4-decision-log` merged, remote branch deleted, local refs pruned.

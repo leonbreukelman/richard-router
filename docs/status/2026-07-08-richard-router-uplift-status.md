@@ -1,7 +1,7 @@
 # Track F router-core uplift status
 
 Date: 2026-07-09
-Status: Phase 4 decision-log implementation verified locally on branch `phase4-decision-log`; PR/API landing pending
+Status: Phase 4 landed on `main`; Track F router-core uplift complete
 Mode: `github-pr`
 Base: `7bcbf7e11ed3ced49e9bf8b51215ed3eea8860a0`
 
@@ -49,8 +49,10 @@ The method card was stale. `docs/method/PROJECT.md` still said `local-scaffold`,
 - Request bodies, response bodies, message content, tool schemas, and upstream request headers are not logged.
 - Decision records pass through `redact()` before emission.
 - `observability.decision_log_enabled` controls emission and defaults to `true`.
-- Local gate and Opus review passed; valid review notes were patched. PR/API landing is pending.
+- Decision-log callback/logger failures are isolated so logging cannot break successful routing.
+- Streaming `success` means 2xx stream headers were accepted, not full stream-body completion.
+- Local gate, Opus review, PR-head CI, post-merge CI, branch cleanup, and PR ledger passed.
 
 ## Boundary
 
-No deploy, credential change, branch protection change, public API expansion, persistent log storage, metrics endpoint, or destructive repository action is in scope. Phase 4 is server-side metadata logging only.
+No deploy, credential change, branch protection change, public API expansion, persistent log storage, metrics endpoint, or destructive repository action was taken. Track F is complete through the Phase 4 decision-log scope.
