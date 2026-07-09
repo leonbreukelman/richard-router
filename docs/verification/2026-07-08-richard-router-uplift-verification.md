@@ -215,4 +215,13 @@ Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: non-ret
 
 ## Phase 3 PR/API ledger
 
-Pending push/PR/CI/merge.
+- PR: https://github.com/leonbreukelman/richard-router/pull/8
+- Implementation commit: `337f6de5bac3774cbe426c0d3674f3c9cf8e7550`
+- Merge commit: `31485e266ca44051061e6c931099d9679fbf301d`
+- PR-head CI check-runs read through API:
+  - `uv / ruff / pytest` -> `completed/success`
+  - `copilot-pull-request-reviewer` -> `completed/success`
+- Post-merge push-to-`main` CI check-run read through API: `uv / ruff / pytest` -> `completed/success`
+- Local post-merge gate: `uv sync --all-groups && uv run ruff check . && uv run pytest -v` -> Ruff passed; Pytest `39 passed, 1 warning in 0.16s`.
+- Final PR ledger comment: https://github.com/leonbreukelman/richard-router/pull/8#issuecomment-4928183750
+- Branch cleanup: `phase3-circuit-breaker` merged, remote branch deleted, local refs pruned.

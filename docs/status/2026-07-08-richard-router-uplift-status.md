@@ -1,7 +1,7 @@
 # Track F router-core uplift status
 
 Date: 2026-07-08
-Status: Phase 3 implementation verified locally on branch `phase3-circuit-breaker`; PR/API landing pending
+Status: Phase 3 landed on `main`; Phase 4 decision log is next
 Mode: `github-pr`
 Base: `7bcbf7e11ed3ced49e9bf8b51215ed3eea8860a0`
 
@@ -38,9 +38,9 @@ The method card was stale. `docs/method/PROJECT.md` still said `local-scaffold`,
 - Circuit breaker config added under `failover.circuit_breaker` with the Track F defaults: enabled, threshold 5, cooldown 30s, one half-open probe.
 - Router now tracks breaker state per upstream cache key and skips open circuits before attempting network calls.
 - Retryable HTTP status and transport/timeout exception classification reuses the existing `classify_status` / `classify_exception` taxonomy.
-- Caller/configuration failures such as normal 4xx responses do not open the breaker.
+- Caller/configuration failures such as normal 4xx responses do not open the breaker and reset consecutive failure state.
 - Streaming and non-streaming paths both respect breaker state and reset it on successful upstream responses.
-- Local implementation gate passed; PR/API landing remains pending.
+- Local gate, Opus review, PR-head CI, post-merge CI, branch cleanup, and PR ledger passed.
 
 ## Boundary
 
