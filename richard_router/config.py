@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 DEFAULT_RETRY_STATUS = (408, 409, 429, 500, 502, 503, 504)
+DEFAULT_READ_TIMEOUT_SECONDS = 60.0
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -16,8 +20,11 @@ class Upstream:
     base_url: str
     model: str
     api_key_env: str = ""
-    timeout_seconds: float = 60.0
+    timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
     headers: dict[str, str] = field(default_factory=dict)
+    connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    write_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
+    pool_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
 
     @property
     def chat_completions_url(self) -> str:
@@ -60,27 +67,167 @@ class RouterConfig:
         return os.getenv(self.inbound_api_key_env, "").strip() if self.inbound_api_key_env else ""
 
 
+class ProviderConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    base_url: str = ""
+    api_key_env: str = ""
+    headers: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: float | None = None
+    connect_timeout_seconds: float | None = None
+    write_timeout_seconds: float | None = None
+    pool_timeout_seconds: float | None = None
+
+
+class UpstreamConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    model: str | None = None
+    headers: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: float | None = None
+    connect_timeout_seconds: float | None = None
+    write_timeout_seconds: float | None = None
+    pool_timeout_seconds: float | None = None
+
+
+class VirtualModelConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    owned_by: str = "richard-router"
+    upstreams: list[UpstreamConfigModel] = Field(default_factory=list)
+
+
+class FailoverConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    retry_on_status: list[int] = Field(default_factory=lambda: list(DEFAULT_RETRY_STATUS))
+    retry_on_timeout: bool = True
+    retry_on_connection_error: bool = True
+    max_attempts_per_upstream: int = 1
+
+
+class ObservabilityConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    expose_upstream_header: bool = False
+
+
+class AuthConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    api_key_env: str = ""
+
+
+class RouterConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    providers: dict[str, ProviderConfigModel] = Field(default_factory=dict)
+    virtual_models: dict[str, VirtualModelConfigModel] = Field(default_factory=dict)
+    failover: FailoverConfigModel = Field(default_factory=FailoverConfigModel)
+    observability: ObservabilityConfigModel = Field(default_factory=ObservabilityConfigModel)
+    auth: AuthConfigModel = Field(default_factory=AuthConfigModel)
+
+
+ConfigInput = RouterConfig | RouterConfigModel | Mapping[str, Any]
+
+
 def _as_headers(raw: Any) -> dict[str, str]:
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         return {}
     return {str(k): str(v) for k, v in raw.items() if v is not None}
 
 
-def _load_upstream(raw: dict[str, Any]) -> Upstream:
-    missing = [key for key in ("name", "base_url", "model") if not raw.get(key)]
-    if missing:
-        raise ValueError(f"upstream missing required fields: {', '.join(missing)}")
-    return Upstream(
-        name=str(raw["name"]),
-        base_url=str(raw["base_url"]),
-        model=str(raw["model"]),
-        api_key_env=str(raw.get("api_key_env") or ""),
-        timeout_seconds=float(raw.get("timeout_seconds") or 60.0),
-        headers=_as_headers(raw.get("headers")),
-    )
+def _env_has_value(env: Mapping[str, str], name: str) -> bool:
+    return bool(str(env.get(name, "")).strip())
 
 
-def load_config(path: str | Path | None = None) -> RouterConfig:
+def _format_pydantic_error(error: dict[str, Any]) -> str:
+    loc = ".".join(str(part) for part in error.get("loc", ())) or "config"
+    return f"{loc}: {error.get('msg', 'invalid value')}"
+
+
+def _model_from_config_input(cfg: ConfigInput) -> tuple[RouterConfigModel | None, list[str]]:
+    if isinstance(cfg, RouterConfigModel):
+        return cfg, []
+    if isinstance(cfg, RouterConfig):
+        return None, []
+    if not isinstance(cfg, Mapping):
+        return None, ["config root must be a mapping"]
+    try:
+        return RouterConfigModel.model_validate(dict(cfg)), []
+    except ValidationError as exc:
+        return None, [_format_pydantic_error(cast(dict[str, Any], error)) for error in exc.errors()]
+
+
+def _validate_normalized_config(cfg: RouterConfig, env: Mapping[str, str]) -> list[str]:
+    problems: list[str] = []
+    if not cfg.virtual_models:
+        problems.append("virtual_models must be a non-empty mapping")
+    for virtual_name, virtual in cfg.virtual_models.items():
+        if not virtual.upstreams:
+            problems.append(f"virtual_models.{virtual_name}.upstreams must be a non-empty list")
+        for index, upstream in enumerate(virtual.upstreams):
+            prefix = f"virtual_models.{virtual_name}.upstreams[{index}]"
+            if not upstream.name:
+                problems.append(f"{prefix}.name is required")
+            if not upstream.base_url:
+                problems.append(f"{prefix}.base_url is required")
+            if not upstream.model:
+                problems.append(f"{prefix}.model is required")
+            if upstream.api_key_env and not _env_has_value(env, upstream.api_key_env):
+                problems.append(
+                    f"{prefix} env var {upstream.api_key_env} is not set"
+                )
+    return problems
+
+
+def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> list[str]:
+    """Return config problems without mutating process state or exposing secret values."""
+    effective_env = os.environ if env is None else env
+    if isinstance(cfg, RouterConfig):
+        return _validate_normalized_config(cfg, effective_env)
+
+    model, problems = _model_from_config_input(cfg)
+    if model is None:
+        return problems
+
+    if not model.virtual_models:
+        problems.append("virtual_models must be a non-empty mapping")
+    for virtual_name, virtual in model.virtual_models.items():
+        if not virtual.upstreams:
+            problems.append(f"virtual_models.{virtual_name}.upstreams must be a non-empty list")
+            continue
+        for index, upstream in enumerate(virtual.upstreams):
+            prefix = f"virtual_models.{virtual_name}.upstreams[{index}]"
+            if not upstream.model:
+                problems.append(f"{prefix}.model is required")
+            if upstream.provider:
+                provider = model.providers.get(upstream.provider)
+                if provider is None:
+                    problems.append(f"{prefix}.provider '{upstream.provider}' is not defined")
+                    continue
+                if not provider.base_url and not upstream.base_url:
+                    problems.append(f"providers.{upstream.provider}.base_url is required")
+                api_key_env = (
+                    upstream.api_key_env
+                    if upstream.api_key_env is not None
+                    else provider.api_key_env
+                )
+            else:
+                api_key_env = upstream.api_key_env or ""
+                for required in ("name", "base_url", "model"):
+                    if not getattr(upstream, required):
+                        problems.append(f"{prefix}.{required} is required for inline upstreams")
+            if api_key_env and not _env_has_value(effective_env, api_key_env):
+                problems.append(f"{prefix} env var {api_key_env} is not set")
+    return problems
+
+
+def _resolve_config_path(path: str | Path | None = None) -> Path:
     config_path = Path(
         path
         or os.getenv("ROUTER_CONFIG")
@@ -91,60 +238,100 @@ def load_config(path: str | Path | None = None) -> RouterConfig:
         example = Path("config/router.example.yaml")
         if example.exists():
             config_path = example
+    return config_path
+
+
+def read_config_data(path: str | Path | None = None) -> dict[str, Any]:
+    config_path = _resolve_config_path(path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping: {config_path}")
+    return raw
 
-    failover_raw = raw.get("failover") or {}
-    if not isinstance(failover_raw, dict):
-        raise ValueError("failover must be a mapping")
-    retry_status = failover_raw.get("retry_on_status", DEFAULT_RETRY_STATUS)
-    failover = FailoverConfig(
-        retry_on_status=tuple(int(x) for x in retry_status),
-        retry_on_timeout=bool(failover_raw.get("retry_on_timeout", True)),
-        retry_on_connection_error=bool(failover_raw.get("retry_on_connection_error", True)),
-        max_attempts_per_upstream=max(
-            1,
-            int(failover_raw.get("max_attempts_per_upstream", 1)),
+
+def _coalesce_float(*values: float | None, default: float) -> float:
+    for value in values:
+        if value is not None:
+            return float(value)
+    return default
+
+
+def _normalize_upstream(
+    providers: Mapping[str, ProviderConfigModel], upstream: UpstreamConfigModel
+) -> Upstream:
+    provider = providers[upstream.provider] if upstream.provider else None
+    provider_headers = _as_headers(provider.headers if provider else None)
+    upstream_headers = _as_headers(upstream.headers)
+    headers = {**provider_headers, **upstream_headers}
+    model = str(upstream.model or "")
+    provider_name = str(upstream.provider or "")
+    name = upstream.name or (f"{provider_name}:{model}" if provider_name else "")
+    return Upstream(
+        name=str(name),
+        base_url=str(upstream.base_url or (provider.base_url if provider else "")),
+        model=model,
+        api_key_env=str(
+            upstream.api_key_env
+            if upstream.api_key_env is not None
+            else (provider.api_key_env if provider else "")
+        ),
+        timeout_seconds=_coalesce_float(
+            upstream.timeout_seconds,
+            provider.timeout_seconds if provider else None,
+            default=DEFAULT_READ_TIMEOUT_SECONDS,
+        ),
+        headers=headers,
+        connect_timeout_seconds=_coalesce_float(
+            upstream.connect_timeout_seconds,
+            provider.connect_timeout_seconds if provider else None,
+            default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        ),
+        write_timeout_seconds=_coalesce_float(
+            upstream.write_timeout_seconds,
+            provider.write_timeout_seconds if provider else None,
+            default=DEFAULT_READ_TIMEOUT_SECONDS,
+        ),
+        pool_timeout_seconds=_coalesce_float(
+            upstream.pool_timeout_seconds,
+            provider.pool_timeout_seconds if provider else None,
+            default=DEFAULT_READ_TIMEOUT_SECONDS,
         ),
     )
 
-    vm_raw = raw.get("virtual_models") or {}
-    if not isinstance(vm_raw, dict) or not vm_raw:
-        raise ValueError("virtual_models must be a non-empty mapping")
 
-    virtual_models: dict[str, VirtualModel] = {}
-    for model_name, model_cfg in vm_raw.items():
-        if not isinstance(model_cfg, dict):
-            raise ValueError(f"virtual_models.{model_name} must be a mapping")
-        upstreams_raw = model_cfg.get("upstreams") or []
-        if not isinstance(upstreams_raw, list) or not upstreams_raw:
-            raise ValueError(f"virtual_models.{model_name}.upstreams must be a non-empty list")
-        upstreams = tuple(_load_upstream(item) for item in upstreams_raw if isinstance(item, dict))
-        if not upstreams:
-            raise ValueError(f"virtual_models.{model_name}.upstreams has no valid entries")
-        virtual_models[str(model_name)] = VirtualModel(
-            name=str(model_name),
-            upstreams=upstreams,
-            owned_by=str(model_cfg.get("owned_by") or "richard-router"),
-        )
-
-    auth_raw = raw.get("auth") or {}
-    if auth_raw is None:
-        auth_raw = {}
-    if not isinstance(auth_raw, dict):
-        raise ValueError("auth must be a mapping")
-
-    observability_raw = raw.get("observability") or {}
-    if not isinstance(observability_raw, dict):
-        raise ValueError("observability must be a mapping")
-    observability = ObservabilityConfig(
-        expose_upstream_header=bool(observability_raw.get("expose_upstream_header", False))
+def _build_router_config(model: RouterConfigModel) -> RouterConfig:
+    retry_status = model.failover.retry_on_status or list(DEFAULT_RETRY_STATUS)
+    failover = FailoverConfig(
+        retry_on_status=tuple(int(x) for x in retry_status),
+        retry_on_timeout=bool(model.failover.retry_on_timeout),
+        retry_on_connection_error=bool(model.failover.retry_on_connection_error),
+        max_attempts_per_upstream=max(1, int(model.failover.max_attempts_per_upstream)),
     )
-
+    virtual_models: dict[str, VirtualModel] = {}
+    for model_name, model_cfg in model.virtual_models.items():
+        upstreams = tuple(
+            _normalize_upstream(model.providers, upstream) for upstream in model_cfg.upstreams
+        )
+        virtual_models[str(model_name)] = VirtualModel(
+            name=str(model_name), upstreams=upstreams, owned_by=str(model_cfg.owned_by)
+        )
     return RouterConfig(
         virtual_models=virtual_models,
         failover=failover,
-        observability=observability,
-        inbound_api_key_env=str(auth_raw.get("api_key_env") or ""),
+        observability=ObservabilityConfig(
+            expose_upstream_header=bool(model.observability.expose_upstream_header)
+        ),
+        inbound_api_key_env=str(model.auth.api_key_env or ""),
     )
+
+
+def load_config(
+    path: str | Path | None = None, *, env: Mapping[str, str] | None = None
+) -> RouterConfig:
+    raw = read_config_data(path)
+    problems = validate_config(raw, env=env)
+    if problems:
+        details = "\n".join(f"- {problem}" for problem in problems)
+        raise ValueError(f"invalid router config:\n{details}")
+    model = RouterConfigModel.model_validate(raw)
+    return _build_router_config(model)

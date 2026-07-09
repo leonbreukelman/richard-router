@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import sys
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from richard_router.config import RouterConfig, load_config
+from richard_router.config import RouterConfig, load_config, read_config_data, validate_config
 from richard_router.service import RichardRouter, RouterResult, RouterStream
 
 
@@ -85,22 +86,51 @@ def create_app(config: RouterConfig | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+class LazyApp:
+    def __init__(self) -> None:
+        self._app: FastAPI | None = None
+
+    def _get_app(self) -> FastAPI:
+        if self._app is None:
+            self._app = create_app()
+        return self._app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self._get_app()(scope, receive, send)
 
 
-def cli() -> None:
+app = LazyApp()
+
+
+def _validate_cli(config_path: str) -> int:
+    try:
+        raw = read_config_data(config_path)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    problems = validate_config(raw)
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 1
+    print("config ok")
+    return 0
+
+
+def cli(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run richard-router")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=4000, type=int)
     parser.add_argument("--config", default=None, help="Path to router YAML config")
-    args = parser.parse_args()
-    if args.config:
-        import os
-
-        os.environ["ROUTER_CONFIG"] = args.config
+    subparsers = parser.add_subparsers(dest="command")
+    validate_parser = subparsers.add_parser("validate", help="Validate router YAML config")
+    validate_parser.add_argument("--config", required=True, help="Path to router YAML config")
+    args = parser.parse_args(argv)
+    if args.command == "validate":
+        raise SystemExit(_validate_cli(args.config))
     import uvicorn
 
-    uvicorn.run("richard_router.main:app", host=args.host, port=args.port, reload=False)
+    uvicorn.run(create_app(load_config(args.config)), host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":
