@@ -23,6 +23,7 @@ richard-router = "richard_router.main:cli"
 
 [dependency-groups]
 dev = [
+  "httpx2>=2.5.0",
   "pytest>=8.0.0",
   "pytest-asyncio>=0.23.0",
   "ruff>=0.8.0",
