@@ -34,6 +34,9 @@ observability:
   # Keep false for normal Hermes use so the abstraction does not leak upstream names.
   # Set true only for local diagnostics/live smoke verification.
   expose_upstream_header: false
+  # Emits server-side route decisions with metadata only; request/response bodies
+  # are never logged and metadata is redacted before emission.
+  decision_log_enabled: true
 
 virtual_models:
   coding:

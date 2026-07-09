@@ -122,6 +122,14 @@ observability:
 That adds `x-richard-router-upstream` to responses so you can prove which
 upstream handled a request. Leave it false for normal Hermes use.
 
+The router emits server-side decision logs for chat-completion routing by
+default. Records include metadata only: virtual model, selected upstream,
+status/outcome, stream flag, and failed-attempt summaries. Request and response
+message bodies are never logged, and every record passes through redaction before
+emission. Set `observability.decision_log_enabled: false` to silence these logs.
+For streaming requests, a logged `success` means an upstream was selected and
+returned 2xx headers; it does not prove the whole stream body completed.
+
 ## Development
 
 ```bash

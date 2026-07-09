@@ -115,8 +115,10 @@ def test_example_file_provider_form_parses_and_documents_inline_backcompat():
     assert cfg.failover.circuit_breaker.failure_threshold == 5
     assert cfg.failover.circuit_breaker.cooldown_seconds == 30.0
     assert cfg.failover.circuit_breaker.half_open_max_probes == 1
+    assert cfg.observability.decision_log_enabled is True
     assert "provider: nvidia" in text
     assert "circuit_breaker:" in text
+    assert "decision_log_enabled: true" in text
     assert "Legacy inline form remains supported" in text
 
 
