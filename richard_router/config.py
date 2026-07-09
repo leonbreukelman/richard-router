@@ -63,6 +63,10 @@ class FailoverConfig:
 class ObservabilityConfig:
     expose_upstream_header: bool = False
     decision_log_enabled: bool = True
+    metrics_window: int = 100
+    degraded_threshold: int = 3
+    down_threshold: int = 5
+    degraded_error_pct: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -135,6 +139,10 @@ class ObservabilityConfigModel(BaseModel):
 
     expose_upstream_header: bool = False
     decision_log_enabled: bool = True
+    metrics_window: int = 100
+    degraded_threshold: int = 3
+    down_threshold: int = 5
+    degraded_error_pct: float = 20.0
 
 
 class AuthConfigModel(BaseModel):
@@ -364,6 +372,10 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
         observability=ObservabilityConfig(
             expose_upstream_header=bool(model.observability.expose_upstream_header),
             decision_log_enabled=bool(model.observability.decision_log_enabled),
+            metrics_window=int(model.observability.metrics_window),
+            degraded_threshold=int(model.observability.degraded_threshold),
+            down_threshold=int(model.observability.down_threshold),
+            degraded_error_pct=float(model.observability.degraded_error_pct),
         ),
         inbound_api_key_env=str(model.auth.api_key_env or ""),
     )

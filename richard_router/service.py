@@ -11,6 +11,7 @@ import httpx
 
 from richard_router.config import RouterConfig, Upstream, VirtualModel
 from richard_router.errors import classify_exception, classify_status
+from richard_router.metrics import MetricsCollector
 from richard_router.redaction import redact
 
 ClientFactory = Callable[[Upstream], httpx.AsyncClient]
@@ -78,11 +79,13 @@ class RichardRouter:
         client_factory: ClientFactory | None = None,
         clock: Clock | None = None,
         decision_logger: DecisionLogger | None = None,
+        metrics: MetricsCollector | None = None,
     ):
         self.config = config
         self.client_factory = client_factory or default_client_factory
         self.clock = clock or time.monotonic
         self.decision_logger = decision_logger
+        self.metrics = metrics
         self._clients: dict[ClientCacheKey, httpx.AsyncClient] = {}
         self._circuit_breakers: dict[ClientCacheKey, CircuitBreakerState] = {}
 
@@ -284,6 +287,13 @@ class RichardRouter:
                             status_code=response.status_code,
                             attempts=attempts,
                         )
+                        if self.metrics:
+                            self.metrics.record_attempt(
+                                virtual.name,
+                                upstream.name,
+                                "success",
+                                status_code=response.status_code,
+                            )
                         rewritten, media_type = self._rewrite_response_model(content, virtual.name)
                         return RouterResult(
                             status_code=response.status_code,
@@ -292,6 +302,13 @@ class RichardRouter:
                             headers=self._diagnostic_headers(upstream),
                         )
                     attempts.append(Attempt(upstream.name, "http_error", response.status_code))
+                    if self.metrics:
+                        self.metrics.record_attempt(
+                            virtual.name,
+                            upstream.name,
+                            "http_error",
+                            status_code=response.status_code,
+                        )
                     if self._retryable_status(response.status_code):
                         self._record_retryable_failure(upstream)
                         continue
@@ -316,6 +333,10 @@ class RichardRouter:
                     attempts.append(
                         Attempt(upstream.name, "timeout", error_type="TimeoutException")
                     )
+                    if self.metrics:
+                        self.metrics.record_attempt(
+                            virtual.name, upstream.name, "timeout", error_type="TimeoutException"
+                        )
                     if (
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_timeout
@@ -331,6 +352,13 @@ class RichardRouter:
                             error_type=type(exc).__name__,
                         )
                     )
+                    if self.metrics:
+                        self.metrics.record_attempt(
+                            virtual.name,
+                            upstream.name,
+                            "connection_error",
+                            error_type=type(exc).__name__,
+                        )
                     if (
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_connection_error
@@ -403,6 +431,13 @@ class RichardRouter:
                             status_code=response.status_code,
                             attempts=attempts,
                         )
+                        if self.metrics:
+                            self.metrics.record_attempt(
+                                virtual.name,
+                                upstream.name,
+                                "success",
+                                status_code=response.status_code,
+                            )
                         media_type = self._content_type(response, "text/event-stream")
                         iterator = self._stream_iterator(response, stream_cm, virtual.name)
                         return RouterStream(
@@ -415,6 +450,13 @@ class RichardRouter:
                     await stream_cm.__aexit__(None, None, None)
                     stream_entered = False
                     attempts.append(Attempt(upstream.name, "http_error", response.status_code))
+                    if self.metrics:
+                        self.metrics.record_attempt(
+                            virtual.name,
+                            upstream.name,
+                            "http_error",
+                            status_code=response.status_code,
+                        )
                     if self._retryable_status(response.status_code):
                         self._record_retryable_failure(upstream)
                         continue
@@ -441,6 +483,10 @@ class RichardRouter:
                     attempts.append(
                         Attempt(upstream.name, "timeout", error_type="TimeoutException")
                     )
+                    if self.metrics:
+                        self.metrics.record_attempt(
+                            virtual.name, upstream.name, "timeout", error_type="TimeoutException"
+                        )
                     if (
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_timeout
@@ -458,6 +504,13 @@ class RichardRouter:
                             error_type=type(exc).__name__,
                         )
                     )
+                    if self.metrics:
+                        self.metrics.record_attempt(
+                            virtual.name,
+                            upstream.name,
+                            "connection_error",
+                            error_type=type(exc).__name__,
+                        )
                     if (
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_connection_error
