@@ -3,29 +3,41 @@
 Local instantiation of `docs/method/METHOD.md`. This is the only method file edited per repo. It may select a globally defined lifecycle mode and add stricter constraints; it may not loosen the global contract.
 
 Generated: 2026-07-07
+Updated: 2026-07-08
 
 ## Lifecycle mode
 
-`local-scaffold`
+`github-pr`
 
 Mode notes:
-Local scaffold only. No push/PR/merge/deploy implied. Structural ledger is sufficient for scaffold installation.
+This repo is live on GitHub and now uses per-phase feature branches and PRs. Done requires the `github-pr` evidence ledger from `docs/method/METHOD.md` §8: PR URL, implementation and merge SHAs on `main`, pushed→merged→deleted branch lifecycle, GitHub-read changed-file list, API-read CI check-run conclusion, certification statement, and operator value summary.
 
 ## Protected / frozen paths
 
-None declared yet. Add frozen/generated/security-critical paths here before `github-pr` work.
+No repo-specific generated/frozen paths declared.
+
+Always protected by method/repo policy:
+- Secret material and local config: `.env*`, `config/router.yaml`, `config/*.local.yaml`.
+- Ignored local evidence and runtime artifacts: `reports/`, `.venv/`, caches, and logs.
 
 ## Gate commands
 
-- No gate detected by installer; define before selecting `github-pr` mode.
+- `uv run ruff check .`
+- `uv run pytest -v`
 
 ## CI
 
-absent — no `.github/workflows/` directory detected; first follow-up before `github-pr` governance is to add CI.
+present — `.github/workflows/ci.yml` runs `uv sync --all-groups`, `uv run ruff check .`, and `uv run pytest -v` on push and PR to `main`.
 
 ## Connector scope
 
-No git origin detected. Treat as local unless Leon explicitly adds a remote.
+Remote: `git@github.com:leonbreukelman/richard-router.git` / `https://github.com/leonbreukelman/richard-router`.
+
+Default branch: `main`.
+
+Visibility: public.
+
+Connector scope: GitHub PR lifecycle for scoped branches only. No deploy, production mutation, credential change, or destructive repository action is implied by this card.
 
 ## Documentation discipline
 
@@ -56,7 +68,10 @@ Repo-specific docs overrides:
 
 No secret values belong in repo docs. Only env-var names may be listed here.
 
-No repo-specific env-var names discovered by installer. Add names only, never values.
+- `RICHARD_ROUTER_API_KEY` — optional inbound router auth.
+- `NVIDIA_API_KEY` — example primary provider credential.
+- `OPENROUTER_API_KEY` — example fallback provider credential.
+- Test-only fixture names: `TEST_NVIDIA_KEY`, `TEST_OPENROUTER_KEY`.
 
 ## Exit codes
 
@@ -80,11 +95,11 @@ Verifier: Hermes/Leon flow checks ledger against live evidence.
 - Repo path: `/home/leonb/projects/richard-router`
 - Git root: `/home/leonb/projects/richard-router`
 - Base SHA at install: `unknown`
-- Origin: `none`
+- Current Track F base SHA: `7bcbf7e11ed3ced49e9bf8b51215ed3eea8860a0`
+- Origin: `git@github.com:leonbreukelman/richard-router.git`
+- GitHub repo: `leonbreukelman/richard-router` (`public`)
 
 ## Open decisions
 
-- Confirm protected paths.
-- Confirm final gate commands.
-- Add CI before `github-pr` governance if CI is absent.
-- Verify connector write scope before PR lifecycle work.
+- Consider adding branch protection requiring the `uv / ruff / pytest` CI job after Phase 0 lands.
+- Confirm any future generated/frozen paths before expanding scope beyond this Track F uplift.
