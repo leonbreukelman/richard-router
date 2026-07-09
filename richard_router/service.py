@@ -12,6 +12,7 @@ from richard_router.errors import classify_exception, classify_status
 from richard_router.redaction import redact
 
 ClientFactory = Callable[[Upstream], httpx.AsyncClient]
+ClientCacheKey = tuple[str, str, str]
 
 
 @dataclass
@@ -48,13 +49,38 @@ class RouterStream:
 
 
 def default_client_factory(upstream: Upstream) -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=upstream.timeout_seconds)
+    timeout = httpx.Timeout(
+        connect=upstream.connect_timeout_seconds,
+        read=upstream.timeout_seconds,
+        write=upstream.write_timeout_seconds,
+        pool=upstream.pool_timeout_seconds,
+    )
+    return httpx.AsyncClient(timeout=timeout)
 
 
 class RichardRouter:
     def __init__(self, config: RouterConfig, client_factory: ClientFactory | None = None):
         self.config = config
         self.client_factory = client_factory or default_client_factory
+        self._clients: dict[ClientCacheKey, httpx.AsyncClient] = {}
+
+    @staticmethod
+    def _client_cache_key(upstream: Upstream) -> ClientCacheKey:
+        return (upstream.name, upstream.base_url, upstream.model)
+
+    def _client_for(self, upstream: Upstream) -> httpx.AsyncClient:
+        cache_key = self._client_cache_key(upstream)
+        client = self._clients.get(cache_key)
+        if client is None:
+            client = self.client_factory(upstream)
+            self._clients[cache_key] = client
+        return client
+
+    async def aclose(self) -> None:
+        clients = list(self._clients.values())
+        self._clients.clear()
+        for client in clients:
+            await client.aclose()
 
     def models_payload(self) -> dict[str, Any]:
         return {
@@ -123,7 +149,7 @@ class RichardRouter:
         attempts: list[Attempt] = []
         for upstream in virtual.upstreams:
             for _ in range(self.config.failover.max_attempts_per_upstream):
-                client = self.client_factory(upstream)
+                client = self._client_for(upstream)
                 try:
                     response = await client.post(
                         upstream.chat_completions_url,
@@ -170,9 +196,6 @@ class RichardRouter:
                         or not self.config.failover.retry_on_connection_error
                     ):
                         return self._all_failed(attempts)
-                finally:
-                    await client.aclose()
-
         return self._all_failed(attempts)
 
     def _all_failed(self, attempts: list[Attempt]) -> RouterResult:
@@ -197,18 +220,20 @@ class RichardRouter:
         attempts: list[Attempt] = []
         for upstream in virtual.upstreams:
             for _ in range(self.config.failover.max_attempts_per_upstream):
-                client = self.client_factory(upstream)
+                client = self._client_for(upstream)
                 stream_cm = client.stream(
                     "POST",
                     upstream.chat_completions_url,
                     json=self._rewrite_body(body, upstream),
                     headers=self._upstream_headers(upstream),
                 )
+                stream_entered = False
                 try:
                     response = await stream_cm.__aenter__()
+                    stream_entered = True
                     if 200 <= response.status_code < 300:
                         media_type = self._content_type(response, "text/event-stream")
-                        iterator = self._stream_iterator(response, stream_cm, client, virtual.name)
+                        iterator = self._stream_iterator(response, stream_cm, virtual.name)
                         return RouterStream(
                             iterator=iterator,
                             media_type=media_type,
@@ -217,7 +242,7 @@ class RichardRouter:
 
                     content = await response.aread()
                     await stream_cm.__aexit__(None, None, None)
-                    await client.aclose()
+                    stream_entered = False
                     attempts.append(Attempt(upstream.name, "http_error", response.status_code))
                     if self._retryable_status(response.status_code):
                         continue
@@ -228,16 +253,19 @@ class RichardRouter:
                         headers=self._diagnostic_headers(upstream),
                     )
                 except httpx.TimeoutException as exc:
+                    if stream_entered:
+                        await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
                     attempts.append(
                         Attempt(upstream.name, "timeout", error_type="TimeoutException")
                     )
-                    await client.aclose()
                     if (
                         classify_exception(exc) == "fatal"
                         or not self.config.failover.retry_on_timeout
                     ):
                         return self._all_failed(attempts)
                 except httpx.TransportError as exc:
+                    if stream_entered:
+                        await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
                     attempts.append(
                         Attempt(
                             upstream.name,
@@ -245,7 +273,6 @@ class RichardRouter:
                             error_type=type(exc).__name__,
                         )
                     )
-                    await client.aclose()
                     if (
                         classify_exception(exc) == "fatal"
                         or not self.config.failover.retry_on_connection_error
@@ -288,7 +315,6 @@ class RichardRouter:
     async def _stream_iterator(
         response: httpx.Response,
         stream_cm: Any,
-        client: httpx.AsyncClient,
         virtual_model: str,
     ) -> AsyncIterator[bytes]:
         try:
@@ -296,4 +322,3 @@ class RichardRouter:
                 yield RichardRouter._rewrite_sse_chunk(chunk, virtual_model)
         finally:
             await stream_cm.__aexit__(None, None, None)
-            await client.aclose()
