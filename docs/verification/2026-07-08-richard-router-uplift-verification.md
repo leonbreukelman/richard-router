@@ -2,7 +2,7 @@
 
 Date: 2026-07-08
 Mode: `github-pr`
-Current branch: `phase2-client-pooling`
+Current active branch: `phase4-decision-log`
 Base: `7bcbf7e11ed3ced49e9bf8b51215ed3eea8860a0`
 
 ## Grounding checks
@@ -225,3 +225,48 @@ Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: non-ret
 - Local post-merge gate: `uv sync --all-groups && uv run ruff check . && uv run pytest -v` -> Ruff passed; Pytest `39 passed, 1 warning in 0.16s`.
 - Final PR ledger comment: https://github.com/leonbreukelman/richard-router/pull/8#issuecomment-4928183750
 - Branch cleanup: `phase3-circuit-breaker` merged, remote branch deleted, local refs pruned.
+
+## Phase 4 local gates
+
+Base gate before Phase 4 edits on `main` at `ff462f460d8cbfcc062461dad768c74ad60472f0`:
+
+```bash
+git pull --ff-only && uv sync --all-groups && uv run ruff check . && uv run pytest -v
+```
+
+Observed result:
+
+- `git pull --ff-only`: already up to date
+- `uv sync --all-groups`: resolved 31 packages, checked 30 packages
+- Ruff: `All checks passed!`
+- Pytest: `39 passed, 1 warning in 0.15s`
+
+Targeted Phase 4 tests after implementation:
+
+```bash
+uv run pytest -q tests/test_decision_log.py tests/test_config.py tests/test_service_failover.py tests/test_circuit_breaker.py && uv sync --all-groups && uv run ruff check . && uv run pytest -v
+```
+
+Observed result before independent review:
+
+- Targeted tests: `29 passed in 0.06s`
+- `uv sync --all-groups`: resolved 31 packages, checked 30 packages
+- Ruff: `All checks passed!`
+- Full Pytest: `44 passed, 1 warning in 0.15s`
+
+Observed result after independent-review patches:
+
+- Targeted tests: `31 passed in 0.06s`
+- `uv sync --all-groups`: resolved 31 packages, checked 30 packages
+- Ruff: `All checks passed!`
+- Full Pytest: `46 passed, 1 warning in 0.15s`
+
+## Phase 4 independent review
+
+Opus review output: `docs/verification/2026-07-09-phase4-opus-review.json`.
+
+Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: decision-log callback/logger failures are isolated so logging cannot break successful routing; exception-attempt logging now has regression coverage proving `error_type` is class-name metadata only and exception text/hosts are not logged; the ADR and README document that streaming `success` means 2xx stream headers were accepted, not full stream-body completion.
+
+## Phase 4 PR/API ledger
+
+Pending push/PR/CI/merge.

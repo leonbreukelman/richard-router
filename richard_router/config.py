@@ -62,6 +62,7 @@ class FailoverConfig:
 @dataclass(frozen=True)
 class ObservabilityConfig:
     expose_upstream_header: bool = False
+    decision_log_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ class ObservabilityConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     expose_upstream_header: bool = False
+    decision_log_enabled: bool = True
 
 
 class AuthConfigModel(BaseModel):
@@ -360,7 +362,8 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
         virtual_models=virtual_models,
         failover=failover,
         observability=ObservabilityConfig(
-            expose_upstream_header=bool(model.observability.expose_upstream_header)
+            expose_upstream_header=bool(model.observability.expose_upstream_header),
+            decision_log_enabled=bool(model.observability.decision_log_enabled),
         ),
         inbound_api_key_env=str(model.auth.api_key_env or ""),
     )

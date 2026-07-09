@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,9 @@ from richard_router.redaction import redact
 ClientFactory = Callable[[Upstream], httpx.AsyncClient]
 Clock = Callable[[], float]
 ClientCacheKey = tuple[str, str, str]
+DecisionLogger = Callable[[dict[str, Any]], None]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,10 +77,12 @@ class RichardRouter:
         config: RouterConfig,
         client_factory: ClientFactory | None = None,
         clock: Clock | None = None,
+        decision_logger: DecisionLogger | None = None,
     ):
         self.config = config
         self.client_factory = client_factory or default_client_factory
         self.clock = clock or time.monotonic
+        self.decision_logger = decision_logger
         self._clients: dict[ClientCacheKey, httpx.AsyncClient] = {}
         self._circuit_breakers: dict[ClientCacheKey, CircuitBreakerState] = {}
 
@@ -205,10 +211,52 @@ class RichardRouter:
             return {}
         return {"x-richard-router-upstream": upstream.name}
 
+    def _emit_decision_log(self, record: dict[str, Any]) -> None:
+        if not self.config.observability.decision_log_enabled:
+            return
+        try:
+            safe_record = redact(record)
+            if self.decision_logger is not None:
+                self.decision_logger(safe_record)
+                return
+            logger.info("richard_router.decision %s", json.dumps(safe_record, sort_keys=True))
+        except Exception:
+            logger.warning("richard_router.decision_log_failed", exc_info=True)
+
+    def _emit_route_decision(
+        self,
+        *,
+        virtual_model: str,
+        stream: bool,
+        outcome: str,
+        selected_upstream: str | None,
+        status_code: int | None,
+        attempts: list[Attempt],
+    ) -> None:
+        self._emit_decision_log(
+            {
+                "event": "chat_completion.route",
+                "stream": stream,
+                "virtual_model": virtual_model,
+                "outcome": outcome,
+                "selected_upstream": selected_upstream,
+                "status_code": status_code,
+                "attempts": [attempt.safe_dict() for attempt in attempts],
+            }
+        )
+
     async def chat_completion(self, body: dict[str, Any]) -> RouterResult:
         virtual_name = str(body.get("model") or "")
         virtual = self._lookup_model(virtual_name)
         if virtual is None:
+            self._emit_route_decision(
+                virtual_model=virtual_name,
+                stream=False,
+                outcome="unknown_model",
+                selected_upstream=None,
+                status_code=404,
+                attempts=[],
+            )
             return self._error_result(404, f"unknown virtual model: {virtual_name}")
 
         attempts: list[Attempt] = []
@@ -228,6 +276,14 @@ class RichardRouter:
                     content = response.content
                     if 200 <= response.status_code < 300:
                         self._record_upstream_success(upstream)
+                        self._emit_route_decision(
+                            virtual_model=virtual.name,
+                            stream=False,
+                            outcome="success",
+                            selected_upstream=upstream.name,
+                            status_code=response.status_code,
+                            attempts=attempts,
+                        )
                         rewritten, media_type = self._rewrite_response_model(content, virtual.name)
                         return RouterResult(
                             status_code=response.status_code,
@@ -240,6 +296,14 @@ class RichardRouter:
                         self._record_retryable_failure(upstream)
                         continue
                     self._record_upstream_success(upstream)
+                    self._emit_route_decision(
+                        virtual_model=virtual.name,
+                        stream=False,
+                        outcome="http_error",
+                        selected_upstream=upstream.name,
+                        status_code=response.status_code,
+                        attempts=attempts,
+                    )
                     return RouterResult(
                         status_code=response.status_code,
                         content=content,
@@ -256,7 +320,7 @@ class RichardRouter:
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_timeout
                     ):
-                        return self._all_failed(attempts)
+                        return self._all_failed(attempts, virtual.name, stream=False)
                 except httpx.TransportError as exc:
                     if self._retryable_exception(exc):
                         self._record_retryable_failure(upstream)
@@ -271,10 +335,20 @@ class RichardRouter:
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_connection_error
                     ):
-                        return self._all_failed(attempts)
-        return self._all_failed(attempts)
+                        return self._all_failed(attempts, virtual.name, stream=False)
+        return self._all_failed(attempts, virtual.name, stream=False)
 
-    def _all_failed(self, attempts: list[Attempt]) -> RouterResult:
+    def _all_failed(
+        self, attempts: list[Attempt], virtual_model: str, *, stream: bool
+    ) -> RouterResult:
+        self._emit_route_decision(
+            virtual_model=virtual_model,
+            stream=stream,
+            outcome="all_failed",
+            selected_upstream=None,
+            status_code=503,
+            attempts=attempts,
+        )
         return RouterResult(
             status_code=503,
             content=json.dumps(
@@ -291,6 +365,14 @@ class RichardRouter:
         virtual_name = str(body.get("model") or "")
         virtual = self._lookup_model(virtual_name)
         if virtual is None:
+            self._emit_route_decision(
+                virtual_model=virtual_name,
+                stream=True,
+                outcome="unknown_model",
+                selected_upstream=None,
+                status_code=404,
+                attempts=[],
+            )
             return self._error_result(404, f"unknown virtual model: {virtual_name}")
 
         attempts: list[Attempt] = []
@@ -313,6 +395,14 @@ class RichardRouter:
                     stream_entered = True
                     if 200 <= response.status_code < 300:
                         self._record_upstream_success(upstream)
+                        self._emit_route_decision(
+                            virtual_model=virtual.name,
+                            stream=True,
+                            outcome="success",
+                            selected_upstream=upstream.name,
+                            status_code=response.status_code,
+                            attempts=attempts,
+                        )
                         media_type = self._content_type(response, "text/event-stream")
                         iterator = self._stream_iterator(response, stream_cm, virtual.name)
                         return RouterStream(
@@ -329,6 +419,14 @@ class RichardRouter:
                         self._record_retryable_failure(upstream)
                         continue
                     self._record_upstream_success(upstream)
+                    self._emit_route_decision(
+                        virtual_model=virtual.name,
+                        stream=True,
+                        outcome="http_error",
+                        selected_upstream=upstream.name,
+                        status_code=response.status_code,
+                        attempts=attempts,
+                    )
                     return RouterResult(
                         status_code=response.status_code,
                         content=content,
@@ -347,7 +445,7 @@ class RichardRouter:
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_timeout
                     ):
-                        return self._all_failed(attempts)
+                        return self._all_failed(attempts, virtual.name, stream=True)
                 except httpx.TransportError as exc:
                     if stream_entered:
                         await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
@@ -364,9 +462,9 @@ class RichardRouter:
                         not self._retryable_exception(exc)
                         or not self.config.failover.retry_on_connection_error
                     ):
-                        return self._all_failed(attempts)
+                        return self._all_failed(attempts, virtual.name, stream=True)
 
-        return self._all_failed(attempts)
+        return self._all_failed(attempts, virtual.name, stream=True)
 
     @staticmethod
     def _rewrite_sse_chunk(chunk: bytes, virtual_model: str) -> bytes:
