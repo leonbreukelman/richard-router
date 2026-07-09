@@ -4,13 +4,15 @@ import argparse
 import hmac
 import json
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from richard_router.config import RouterConfig, load_config, read_config_data, validate_config
-from richard_router.service import RichardRouter, RouterResult, RouterStream
+from richard_router.service import ClientFactory, RichardRouter, RouterResult, RouterStream
 
 
 def _check_auth(request: Request, config: RouterConfig) -> None:
@@ -25,10 +27,21 @@ def _check_auth(request: Request, config: RouterConfig) -> None:
     raise HTTPException(status_code=401, detail="unauthorized")
 
 
-def create_app(config: RouterConfig | None = None) -> FastAPI:
+def create_app(
+    config: RouterConfig | None = None,
+    client_factory: ClientFactory | None = None,
+) -> FastAPI:
     cfg = config or load_config()
-    router = RichardRouter(cfg)
-    app = FastAPI(title="richard-router", version="0.1.0")
+    router = RichardRouter(cfg, client_factory=client_factory)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await router.aclose()
+
+    app = FastAPI(title="richard-router", version="0.1.0", lifespan=lifespan)
     app.state.router_config = cfg
     app.state.richard_router = router
 
