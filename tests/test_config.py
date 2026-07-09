@@ -111,7 +111,12 @@ def test_example_file_provider_form_parses_and_documents_inline_backcompat():
         text = config_file.read()
 
     assert list(cfg.virtual_models) == ["coding"]
+    assert cfg.failover.circuit_breaker.enabled is True
+    assert cfg.failover.circuit_breaker.failure_threshold == 5
+    assert cfg.failover.circuit_breaker.cooldown_seconds == 30.0
+    assert cfg.failover.circuit_breaker.half_open_max_probes == 1
     assert "provider: nvidia" in text
+    assert "circuit_breaker:" in text
     assert "Legacy inline form remains supported" in text
 
 
@@ -123,3 +128,20 @@ def test_legacy_inline_fixture_still_parses(tmp_path):
     )
 
     assert cfg.virtual_models["coding"].upstreams[0].base_url == "https://provider.test/v1"
+
+
+def test_circuit_breaker_config_validation_reports_invalid_values():
+    raw = _provider_reference_config()
+    raw["failover"] = {
+        "circuit_breaker": {
+            "failure_threshold": 0,
+            "cooldown_seconds": -1,
+            "half_open_max_probes": 0,
+        }
+    }
+
+    problems = validate_config(raw, env={"TEST_PROVIDER_API_KEY": "present"})
+
+    assert "failover.circuit_breaker.failure_threshold must be at least 1" in problems
+    assert "failover.circuit_breaker.cooldown_seconds must be non-negative" in problems
+    assert "failover.circuit_breaker.half_open_max_probes must be at least 1" in problems

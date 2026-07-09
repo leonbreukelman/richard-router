@@ -170,3 +170,49 @@ Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: added s
 - PR-head CI check-run read through API: `uv / ruff / pytest` -> `completed/success`
 - Post-merge push-to-`main` CI check-run read through API: `uv / ruff / pytest` -> `completed/success`
 - Final PR ledger comment: https://github.com/leonbreukelman/richard-router/pull/6#issuecomment-4925853539
+
+## Phase 3 local gates
+
+Base gate before Phase 3 edits on `main` at `fe95354fbbbc248f514a0f6043645fe74e8323ed`:
+
+```bash
+uv sync --all-groups && uv run ruff check . && uv run pytest -v
+```
+
+Observed result:
+
+- `uv sync --all-groups`: resolved 31 packages, checked 30 packages
+- Ruff: `All checks passed!`
+- Pytest: `31 passed, 1 warning in 0.14s`
+
+Targeted Phase 3 tests after implementation:
+
+```bash
+uv run pytest -q tests/test_circuit_breaker.py tests/test_config.py tests/test_service_failover.py tests/test_pooling.py && uv run ruff check .
+```
+
+Observed result before review patches: `26 passed, 1 warning in 0.14s`; Ruff: `All checks passed!`.
+Observed result after review patches: `28 passed, 1 warning in 0.15s`; Ruff: `All checks passed!`.
+
+Full repo gate after implementation:
+
+```bash
+uv sync --all-groups && uv run ruff check . && uv run pytest -v
+```
+
+Observed result:
+
+- `uv sync --all-groups`: resolved 31 packages, checked 30 packages
+- Ruff: `All checks passed!`
+- Pytest before review patches: `37 passed, 1 warning in 0.14s`
+- Pytest after review patches: `39 passed, 1 warning in 0.15s`
+
+## Phase 3 independent review
+
+Opus review output: `docs/verification/2026-07-08-phase3-opus-review.json`.
+
+Result: `ACCEPT`, with nonblocking notes. Valid notes patched before PR: non-retryable HTTP responses now reset breaker state so half-open probes cannot wedge the circuit open and caller/config 4xx responses break the consecutive-failure streak.
+
+## Phase 3 PR/API ledger
+
+Pending push/PR/CI/merge.

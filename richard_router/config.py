@@ -43,11 +43,20 @@ class VirtualModel:
 
 
 @dataclass(frozen=True)
+class CircuitBreakerConfig:
+    enabled: bool = True
+    failure_threshold: int = 5
+    cooldown_seconds: float = 30.0
+    half_open_max_probes: int = 1
+
+
+@dataclass(frozen=True)
 class FailoverConfig:
     retry_on_status: tuple[int, ...] = DEFAULT_RETRY_STATUS
     retry_on_timeout: bool = True
     retry_on_connection_error: bool = True
     max_attempts_per_upstream: int = 1
+    circuit_breaker: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,15 @@ class VirtualModelConfigModel(BaseModel):
     upstreams: list[UpstreamConfigModel] = Field(default_factory=list)
 
 
+class CircuitBreakerConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    failure_threshold: int = 5
+    cooldown_seconds: float = 30.0
+    half_open_max_probes: int = 1
+
+
 class FailoverConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -108,6 +126,7 @@ class FailoverConfigModel(BaseModel):
     retry_on_timeout: bool = True
     retry_on_connection_error: bool = True
     max_attempts_per_upstream: int = 1
+    circuit_breaker: CircuitBreakerConfigModel = Field(default_factory=CircuitBreakerConfigModel)
 
 
 class ObservabilityConfigModel(BaseModel):
@@ -145,6 +164,19 @@ def _env_has_value(env: Mapping[str, str], name: str) -> bool:
     return bool(str(env.get(name, "")).strip())
 
 
+def _validate_circuit_breaker_values(
+    circuit_breaker: CircuitBreakerConfigModel | CircuitBreakerConfig,
+) -> list[str]:
+    problems: list[str] = []
+    if circuit_breaker.failure_threshold < 1:
+        problems.append("failover.circuit_breaker.failure_threshold must be at least 1")
+    if circuit_breaker.cooldown_seconds < 0:
+        problems.append("failover.circuit_breaker.cooldown_seconds must be non-negative")
+    if circuit_breaker.half_open_max_probes < 1:
+        problems.append("failover.circuit_breaker.half_open_max_probes must be at least 1")
+    return problems
+
+
 def _format_pydantic_error(error: dict[str, Any]) -> str:
     loc = ".".join(str(part) for part in error.get("loc", ())) or "config"
     return f"{loc}: {error.get('msg', 'invalid value')}"
@@ -165,6 +197,7 @@ def _model_from_config_input(cfg: ConfigInput) -> tuple[RouterConfigModel | None
 
 def _validate_normalized_config(cfg: RouterConfig, env: Mapping[str, str]) -> list[str]:
     problems: list[str] = []
+    problems.extend(_validate_circuit_breaker_values(cfg.failover.circuit_breaker))
     if not cfg.virtual_models:
         problems.append("virtual_models must be a non-empty mapping")
     for virtual_name, virtual in cfg.virtual_models.items():
@@ -195,6 +228,7 @@ def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> l
     if model is None:
         return problems
 
+    problems.extend(_validate_circuit_breaker_values(model.failover.circuit_breaker))
     if not model.virtual_models:
         problems.append("virtual_models must be a non-empty mapping")
     for virtual_name, virtual in model.virtual_models.items():
@@ -301,11 +335,18 @@ def _normalize_upstream(
 
 def _build_router_config(model: RouterConfigModel) -> RouterConfig:
     retry_status = model.failover.retry_on_status or list(DEFAULT_RETRY_STATUS)
+    circuit_breaker = CircuitBreakerConfig(
+        enabled=bool(model.failover.circuit_breaker.enabled),
+        failure_threshold=max(1, int(model.failover.circuit_breaker.failure_threshold)),
+        cooldown_seconds=max(0.0, float(model.failover.circuit_breaker.cooldown_seconds)),
+        half_open_max_probes=max(1, int(model.failover.circuit_breaker.half_open_max_probes)),
+    )
     failover = FailoverConfig(
         retry_on_status=tuple(int(x) for x in retry_status),
         retry_on_timeout=bool(model.failover.retry_on_timeout),
         retry_on_connection_error=bool(model.failover.retry_on_connection_error),
         max_attempts_per_upstream=max(1, int(model.failover.max_attempts_per_upstream)),
+        circuit_breaker=circuit_breaker,
     )
     virtual_models: dict[str, VirtualModel] = {}
     for model_name, model_cfg in model.virtual_models.items():
