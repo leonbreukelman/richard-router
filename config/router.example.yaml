@@ -5,6 +5,20 @@ auth:
   # Optional. If this env var is set, richard-router requires inbound Bearer auth.
   api_key_env: RICHARD_ROUTER_API_KEY
 
+providers:
+  nvidia:
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    timeout_seconds: 45
+
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    timeout_seconds: 60
+    headers:
+      HTTP-Referer: https://github.com/leonbreukelman/richard-router
+      X-Title: richard-router
+
 failover:
   retry_on_status: [408, 409, 429, 500, 502, 503, 504]
   retry_on_timeout: true
@@ -21,15 +35,15 @@ virtual_models:
     owned_by: richard-router
     upstreams:
       - name: nvidia-glm-5.2
-        base_url: https://integrate.api.nvidia.com/v1
-        api_key_env: NVIDIA_API_KEY
+        provider: nvidia
         model: z-ai/glm-5.2
-        timeout_seconds: 45
       - name: openrouter-glm-5.2
-        base_url: https://openrouter.ai/api/v1
-        api_key_env: OPENROUTER_API_KEY
+        provider: openrouter
         model: z-ai/glm-5.2
-        timeout_seconds: 60
-        headers:
-          HTTP-Referer: https://github.com/leonbreukelman/richard-router
-          X-Title: richard-router
+
+      # Legacy inline form remains supported for back-compat:
+      # - name: inline-compatible-example
+      #   base_url: https://api.example.invalid/v1
+      #   api_key_env: EXAMPLE_API_KEY
+      #   model: example/model
+      #   timeout_seconds: 60
