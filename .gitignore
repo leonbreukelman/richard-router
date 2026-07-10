@@ -17,3 +17,12 @@ config/*.local.yaml
 reports/
 *.log
 .DS_Store
+
+# Strawman dev scripts (iterative codegen scrap)
+fix_lint.py
+main_snippet.txt
+patch_service.py
+update_main.py
+update_main_v2.py
+update_main_v3.py
+update_main_v4.py
