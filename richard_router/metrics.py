@@ -103,7 +103,7 @@ def _format_timestamp(epoch_seconds: float) -> str | None:
 class MetricsCollector:
     """Thread-safe in-memory accumulator for upstream attempt metrics.
 
-    Uses a flat keyed dict ``_{(vm_name, upstream_name): UpstreamMetrics}``
+    Uses a flat keyed dict ``self._upstreams[(vm_name, upstream_name)]``
     so that ``record_attempt()`` is a single hash lookup. The snapshot
     re-groups by virtual model on read.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -255,9 +256,13 @@ class TestMetricsCollector:
         c = MetricsCollector(window_size=25)
         errors: list[BaseException] = []
         stop = threading.Event()
+        start = threading.Barrier(5)
+        seen_lock = threading.Lock()
+        snapshots_seen = 0
 
         def writer():
             try:
+                start.wait()
                 for i in range(2_000):
                     c.record_attempt(
                         "vm1",
@@ -265,15 +270,21 @@ class TestMetricsCollector:
                         "success" if i % 2 == 0 else "http_error",
                         200 if i % 2 == 0 else 503,
                     )
+                    if i % 50 == 0:
+                        time.sleep(0)
             except BaseException as exc:  # pragma: no cover - assertion reports below
                 errors.append(exc)
             finally:
                 stop.set()
 
         def reader():
+            nonlocal snapshots_seen
             try:
+                start.wait()
                 while not stop.is_set():
                     snap = c.snapshot()
+                    with seen_lock:
+                        snapshots_seen += 1
                     for entries in snap.virtual_models.values():
                         for entry in entries:
                             assert entry["total_requests"] == (
@@ -283,8 +294,8 @@ class TestMetricsCollector:
                 errors.append(exc)
                 stop.set()
 
-        threads = [threading.Thread(target=writer)] + [
-            threading.Thread(target=reader) for _ in range(4)
+        threads = [threading.Thread(target=reader) for _ in range(4)] + [
+            threading.Thread(target=writer)
         ]
         for t in threads:
             t.start()
@@ -292,6 +303,7 @@ class TestMetricsCollector:
             t.join()
 
         assert errors == []
+        assert snapshots_seen > 0
         entry = c.snapshot().virtual_models["vm1"][0]
         assert entry["total_requests"] == 2_000
         assert entry["success_count"] == 1_000
