@@ -35,7 +35,10 @@ class UpstreamMetrics:
         status_code: int | None,
         error_type: str | None,
         error_message: str | None = None,
+        window_size: int | None = None,
     ) -> None:
+        if window_size is not None and self._window.maxlen != window_size:
+            self._window = deque(self._window, maxlen=window_size)
         self.total_requests += 1
         now = time.time()
 
@@ -137,7 +140,7 @@ class MetricsCollector:
             if key not in self._upstreams:
                 self._upstreams[key] = UpstreamMetrics(_window=deque(maxlen=self.window_size))
             self._upstreams[key].record(
-                outcome, status_code, error_type, error_message=error_message
+                outcome, status_code, error_type, error_message=error_message, window_size=self.window_size
             )
 
     def snapshot(self) -> MetricsSnapshot:
