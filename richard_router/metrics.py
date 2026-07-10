@@ -25,6 +25,7 @@ class UpstreamMetrics:
     errors_by_type: dict[str, int] = field(default_factory=lambda: {})
     last_ok: float = 0.0
     last_error: float | None = None
+    last_error_message: str | None = None
     consecutive_failures: int = 0
     _window: deque[bool] = field(default_factory=lambda: deque(maxlen=100))
 
@@ -33,14 +34,8 @@ class UpstreamMetrics:
         outcome: str,
         status_code: int | None,
         error_type: str | None,
-        window_size: int | None = None,
+        error_message: str | None = None,
     ) -> None:
-        # Production collectors set maxlen at entry creation. The optional
-        # window_size hook exists for direct UpstreamMetrics tests and future
-        # explicit resizing, not for steady-state request handling.
-        if window_size is not None and self._window.maxlen != window_size:
-            self._window = deque(self._window, maxlen=window_size)
-
         self.total_requests += 1
         now = time.time()
 
@@ -53,6 +48,7 @@ class UpstreamMetrics:
             self.error_count += 1
             self.consecutive_failures += 1
             self.last_error = now
+            self.last_error_message = error_message
             if status_code is not None:
                 self.errors_by_code[status_code] = self.errors_by_code.get(status_code, 0) + 1
             if error_type:
@@ -134,14 +130,15 @@ class MetricsCollector:
         outcome: str,
         status_code: int | None = None,
         error_type: str | None = None,
+        error_message: str | None = None,
     ) -> None:
         key = (virtual_model, upstream_name)
         with self._lock:
             if key not in self._upstreams:
-                self._upstreams[key] = UpstreamMetrics(
-                    _window=deque(maxlen=self.window_size)
-                )
-            self._upstreams[key].record(outcome, status_code, error_type)
+                self._upstreams[key] = UpstreamMetrics(_window=deque(maxlen=self.window_size))
+            self._upstreams[key].record(
+                outcome, status_code, error_type, error_message=error_message
+            )
 
     def snapshot(self) -> MetricsSnapshot:
         group: dict[str, list[dict[str, Any]]] = {}
@@ -162,6 +159,7 @@ class MetricsCollector:
                     "errors_by_type": dict(sorted(m.errors_by_type.items())),
                     "last_ok": _format_timestamp(m.last_ok),
                     "last_error": _format_timestamp(m.last_error) if m.last_error else None,
+                    "last_error_message": m.last_error_message,
                     "consecutive_failures": m.consecutive_failures,
                 }
                 group.setdefault(vm, []).append(entry)
