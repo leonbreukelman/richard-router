@@ -194,8 +194,10 @@ def _status_cli(args: argparse.Namespace) -> int:
     sep = "─" * len(header)
     print(header)
     print(sep)
-    first_vm = True
-    for vm_name in sorted(vms):
+    sorted_vm_names = sorted(vms)
+    for vm_index, vm_name in enumerate(sorted_vm_names):
+        if vm_index > 0:
+            print()
         upstreams = sorted(vms[vm_name], key=lambda u: u["name"])
         for row_idx, up in enumerate(upstreams):
             vm_col = vm_name if row_idx == 0 else ""
@@ -208,9 +210,6 @@ def _status_cli(args: argparse.Namespace) -> int:
                 f"{up['total_requests']:<10} {up['success_count']:<10} "
                 f"{up['error_count']:<8} {up['error_rate_pct']:<9} {last_active}"
             )
-        if not first_vm:
-            print()  # blank line between VM groups
-        first_vm = False
 
     return 0
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from richard_router.config import (
@@ -145,3 +147,64 @@ class TestStatusCLI:
         )
         rc = _status_cli(args)
         assert rc == 1
+
+    def test_cli_status_separates_virtual_model_groups(self, capsys, monkeypatch):
+        import argparse
+        import urllib.request
+
+        from richard_router.main import _status_cli
+
+        payload = {
+            "virtual_models": {
+                "vm-one": [
+                    {
+                        "name": "up-one",
+                        "status": "healthy",
+                        "total_requests": 2,
+                        "success_count": 2,
+                        "error_count": 0,
+                        "error_rate_pct": 0.0,
+                        "last_ok": "2026-07-10T00:00:00Z",
+                        "last_error": None,
+                    }
+                ],
+                "vm-two": [
+                    {
+                        "name": "up-two",
+                        "status": "degraded",
+                        "total_requests": 3,
+                        "success_count": 1,
+                        "error_count": 2,
+                        "error_rate_pct": 66.7,
+                        "last_ok": None,
+                        "last_error": "2026-07-10T00:01:00Z",
+                    }
+                ],
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+
+        args = argparse.Namespace(
+            url="http://router.test",
+            vm=None,
+            json=False,
+            api_key_env="",
+            timeout=2,
+        )
+        assert _status_cli(args) == 0
+        output = capsys.readouterr().out
+        assert "vm-one" in output
+        assert "vm-two" in output
+        assert "\n\nvm-two" in output
+        assert not output.endswith("\n\n")
