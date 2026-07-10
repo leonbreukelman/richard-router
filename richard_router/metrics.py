@@ -140,7 +140,11 @@ class MetricsCollector:
             if key not in self._upstreams:
                 self._upstreams[key] = UpstreamMetrics(_window=deque(maxlen=self.window_size))
             self._upstreams[key].record(
-                outcome, status_code, error_type, error_message=error_message, window_size=self.window_size
+                outcome,
+                status_code,
+                error_type,
+                error_message=error_message,
+                window_size=self.window_size,
             )
 
     def snapshot(self) -> MetricsSnapshot:
