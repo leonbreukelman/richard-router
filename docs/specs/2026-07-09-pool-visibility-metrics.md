@@ -37,10 +37,10 @@ The solution must handle deployments with:
 - **High throughput**: thousands of requests per minute across all pools.
 - **Concurrent access**: FastAPI serves requests on multiple workers/threads.
 
-Performance budget per operation:
-- `record_attempt()` — O(1), no allocations beyond a deque append and atomic counter increments. Must never block the request path.
-- `snapshot()` — O(N) where N = total upstreams across all pools. With 500 upstreams, should serialize in under 5 ms.
-- **Memory** — bounded by `num_upstreams × metrics_window` entries, each ~100 bytes. With default window=100 and 500 upstreams: ~50 KB of rolling-window data + small counters. Negligible.
+Design budget per operation:
+- `record_attempt()` — O(1) for existing upstream entries: one flat-dict lookup, counter updates, optional error-breakdown update, and one bounded deque append under a short critical section. The first observation for a new `(virtual_model, upstream)` key allocates its metrics record.
+- `snapshot()` — O(N) where N = total upstreams across all pools. It computes and copies snapshot entries while holding the collector lock, then returns an immutable response object for serialization.
+- **Memory** — bounded by `num_upstreams × metrics_window` rolling-window entries plus small counters and error-breakdown dicts. Exact byte size is Python-runtime dependent; the important guarantee is no growth with request volume after the window is full.
 
 ## 4. Proposed Architecture
 
@@ -51,12 +51,12 @@ Thread-safe in-memory accumulator injected into `RichardRouter`. Data layout:
 ```
 MetricsCollector
 └── _upstreams: dict[tuple[virtual_model, upstream_name], UpstreamMetrics]
-    ├── total_requests: int            # atomic counter
-    ├── success_count: int             # atomic counter
-    ├── error_count: int               # atomic counter
+    ├── total_requests: int            # lock-protected counter
+    ├── success_count: int             # lock-protected counter
+    ├── error_count: int               # lock-protected counter
     ├── errors_by_code: dict[int, int] # e.g. {429: 3, 503: 1}
     ├── errors_by_type: dict[str, int] # e.g. {"TimeoutException": 2}
-    ├── last_ok: float                 # time.monotonic()
+    ├── last_ok: float                 # epoch seconds from time.time()
     ├── last_error: float | None
     ├── consecutive_failures: int
     └── _window: deque[bool]           # maxlen=metrics_window; True=success, False=failure
@@ -67,7 +67,7 @@ Key structural choices for scale:
 - **Flat keyed dict**, not nested `vm_dict[upstream]`. A flat `(vm, upstream)` tuple key means `record_attempt()` does a single hash lookup and avoids nested dict churn. The `snapshot()` method groups by virtual model when building the response — a cheap dict grouping pass.
 - **`collections.deque(maxlen=window)`** per upstream for the rolling window. Appending is O(1), old entries evaporate automatically. No manual trimming, no unbounded growth.
 - **Integer counters** for totals and error breakdowns — not recomputed from the deque on every call. `record_attempt()` increments counters atomically; the deque is only used to compute `error_rate` (percentage of failures in the window) for health classification.
-- **`threading.Lock`** (reentrant) guarding `_upstreams` dict mutations. The lock is held for the minimum time: one dict __getitem__/setdefault + field mutations on the `UpstreamMetrics` dataclass. The deque append is lock-free within the metrics object's own lock.
+- **`threading.Lock`** guarding `_upstreams` dict mutations and snapshot reads. Writers hold the lock for one dict access plus field mutations on the `UpstreamMetrics` dataclass. Snapshots also build response entries under the same lock so readers cannot observe torn counters or mutating rolling windows.
 
 Concrete `UpstreamMetrics` dataclass:
 
@@ -79,7 +79,7 @@ class UpstreamMetrics:
     error_count: int = 0
     errors_by_code: dict[int, int] = field(default_factory=lambda: {})
     errors_by_type: dict[str, int] = field(default_factory=lambda: {})
-    last_ok: float = 0.0  # time.monotonic()
+    last_ok: float = 0.0  # epoch seconds from time.time()
     last_error: float | None = None
     consecutive_failures: int = 0
     _window: deque[bool] = field(default_factory=lambda: deque(maxlen=100))
@@ -89,12 +89,12 @@ class UpstreamMetrics:
         if outcome == "success" and status_code and 200 <= status_code < 300:
             self.success_count += 1
             self.consecutive_failures = 0
-            self.last_ok = time.monotonic()
+            self.last_ok = time.time()
             self._window.append(True)
         else:
             self.error_count += 1
             self.consecutive_failures += 1
-            self.last_error = time.monotonic()
+            self.last_error = time.time()
             if status_code:
                 self.errors_by_code[status_code] = self.errors_by_code.get(status_code, 0) + 1
             if error_type:
@@ -147,7 +147,7 @@ if self.metrics:
     self.metrics.record_attempt(virtual.name, upstream.name, outcome, status_code, error_type)
 ```
 
-The collector is **non-blocking and never throws** — a best-effort fire-and-forget so metrics tracking can never degrade routing.
+The collector keeps the routing-path critical section small: one locked lookup/update and a bounded deque append per attempt.
 
 ### 4.4 CLI: `richard-router status`
 
@@ -179,23 +179,21 @@ GET /v1/pool
 
 {
   "virtual_models": {
-    "free_ds_nemo": {
-      "upstreams": [
-        {
-          "name": "nvidia-deepseek-v4-flash",
-          "status": "healthy",
-          "total_requests": 142,
-          "success_count": 138,
-          "error_count": 4,
-          "error_rate_pct": 2.8,
-          "errors_by_code": {"429": 3, "503": 1},
-          "errors_by_type": {},
-          "last_ok": "2026-07-09T14:32:01Z",
-          "last_error": "2026-07-09T12:10:05Z",
-          "consecutive_failures": 0
-        }
-      ]
-    }
+    "free_ds_nemo": [
+      {
+        "name": "nvidia-deepseek-v4-flash",
+        "status": "healthy",
+        "total_requests": 142,
+        "success_count": 138,
+        "error_count": 4,
+        "error_rate_pct": 2.8,
+        "errors_by_code": {"429": 3, "503": 1},
+        "errors_by_type": {},
+        "last_ok": "2026-07-09T14:32:01Z",
+        "last_error": "2026-07-09T12:10:05Z",
+        "consecutive_failures": 0
+      }
+    ]
   }
 }
 ```
@@ -215,18 +213,18 @@ observability:
   degraded_error_pct: 20.0       # error_rate within window that also triggers "degraded"
 ```
 
-All default when not specified. Safe defaults for production.
+All default when not specified. `validate_config()` rejects non-positive windows/thresholds, `down_threshold < degraded_threshold`, and `degraded_error_pct` outside 0–100 so bad observability config is surfaced instead of silently masked.
 
-## 5. Scaling Guarantees (explicit)
+## 5. Scaling Properties
 
 | Dimension | Behavior |
 |---|---|
 | **Virtual models** | Flat-keyed dict stores `(vm, upstream)` tuples. 50+ virtual models with any number of upstreams — dict is a single hash layer, not nested. |
 | **Upstreams per pool** | 10+ upstreams per virtual model — only one entry per upstream regardless of routing attempts. |
-| **Request throughput** | `record_attempt()` is ~8 dict lookups + 1 deque append + a few integer ops. Measured: ~200k records/second per upstream on a single thread. Lock contention is negligible because the function is so short. |
-| **Snapshot cost** | O(N) where N = total upstream entries. Grouping by virtual model is a single dict-comprehension pass. JSON serialization dominates. For 500 upstreams: ~2 ms CPU, ~15 KB payload. |
-| **Memory bound** | Each upstream: fixed-size deque (default 100 bools ≈ 800 bytes) + integer counters + two small dicts. 500 upstreams × 1.5 KB ≈ 750 KB. No growth over time. |
-| **Concurrent readers** | Snapshot acquires the same lock as `record_attempt()` but for even less time (a dict copy). Under high load, readers may wait briefly for a writer and vice versa — acceptable for a metrics endpoint. |
+| **Request throughput** | Existing-entry `record_attempt()` is one flat-dict lookup, one bounded deque append, and counter updates under a short lock. No benchmark guarantee is claimed; benchmark before relying on a hard throughput target. |
+| **Snapshot cost** | O(N) where N = total upstream entries. Grouping by virtual model is a single pass; JSON serialization cost depends on response size and runtime. |
+| **Memory bound** | Each upstream has one fixed-size deque plus counters and two small dicts. Memory is bounded by configured upstream cardinality and `metrics_window`, not by total request count. |
+| **Concurrent readers** | Snapshot and writes share the same lock. Readers may briefly wait for writers and vice versa, but snapshots are internally consistent. |
 
 ## 6. File Changes Summary
 

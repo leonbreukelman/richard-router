@@ -35,20 +35,24 @@ class UpstreamMetrics:
         error_type: str | None,
         window_size: int | None = None,
     ) -> None:
-        if window_size is not None:
+        # Production collectors set maxlen at entry creation. The optional
+        # window_size hook exists for direct UpstreamMetrics tests and future
+        # explicit resizing, not for steady-state request handling.
+        if window_size is not None and self._window.maxlen != window_size:
             self._window = deque(self._window, maxlen=window_size)
 
         self.total_requests += 1
+        now = time.time()
 
         if outcome == "success" and status_code is not None and 200 <= status_code < 300:
             self.success_count += 1
             self.consecutive_failures = 0
-            self.last_ok = time.monotonic()
+            self.last_ok = now
             self._window.append(True)
         else:
             self.error_count += 1
             self.consecutive_failures += 1
-            self.last_error = time.monotonic()
+            self.last_error = now
             if status_code is not None:
                 self.errors_by_code[status_code] = self.errors_by_code.get(status_code, 0) + 1
             if error_type:
@@ -90,27 +94,23 @@ class MetricsSnapshot:
         return {"virtual_models": self.virtual_models}
 
 
-def _format_timestamp(monotonic_ts: float) -> str | None:
-    if not monotonic_ts:
+def _format_timestamp(epoch_seconds: float) -> str | None:
+    if not epoch_seconds:
         return None
-    # Convert monotonic clock time to ISO timestamp using boot time offset
-    import time as _time
-
-    boot_time = _time.time() - _time.monotonic()
-    real_time = boot_time + monotonic_ts
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(real_time))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_seconds))
 
 
 class MetricsCollector:
     """Thread-safe in-memory accumulator for upstream attempt metrics.
 
-    Uses a flat keyed dict ``_{(vm_name, upstream_name): UpstreamMetrics}``
-    so that ``record_attempt()`` is a single hash lookup. The snaphot
+    Uses a flat keyed dict ``self._upstreams[(vm_name, upstream_name)]``
+    so that ``record_attempt()`` is a single hash lookup. The snapshot
     re-groups by virtual model on read.
 
-    Thread safety: a single re-entrant lock guards all dict mutations.
-    The lock is held for the absolute minimum time — one dict access plus
-    field updates on the UpstreamMetrics dataclass.
+    Thread safety: a single lock guards all writes and snapshot reads. Writers
+    hold the lock for one dict access plus field updates on the UpstreamMetrics
+    dataclass. Snapshots derive response entries while the same lock is held,
+    so readers cannot observe torn counters or mutating rolling windows.
     """
 
     def __init__(
@@ -122,7 +122,7 @@ class MetricsCollector:
     ) -> None:
         self._upstreams: dict[tuple[str, str], UpstreamMetrics] = {}
         self._lock = Lock()
-        self.window_size = window_size
+        self.window_size = max(1, int(window_size))
         self.down_threshold = down_threshold
         self.degraded_threshold = degraded_threshold
         self.degraded_error_pct = degraded_error_pct
@@ -138,32 +138,31 @@ class MetricsCollector:
         key = (virtual_model, upstream_name)
         with self._lock:
             if key not in self._upstreams:
-                self._upstreams[key] = UpstreamMetrics()
-            self._upstreams[key].record(
-                outcome, status_code, error_type, window_size=self.window_size
-            )
+                self._upstreams[key] = UpstreamMetrics(
+                    _window=deque(maxlen=self.window_size)
+                )
+            self._upstreams[key].record(outcome, status_code, error_type)
 
     def snapshot(self) -> MetricsSnapshot:
         group: dict[str, list[dict[str, Any]]] = {}
         with self._lock:
-            items = list(self._upstreams.items())
-        for (vm, upstream), m in items:
-            entry: dict[str, Any] = {
-                "name": upstream,
-                "status": m.classify(
-                    down_threshold=self.down_threshold,
-                    degraded_threshold=self.degraded_threshold,
-                    degraded_error_pct=self.degraded_error_pct,
-                ),
-                "total_requests": m.total_requests,
-                "success_count": m.success_count,
-                "error_count": m.error_count,
-                "error_rate_pct": round(m.error_rate_pct(), 1),
-                "errors_by_code": dict(sorted(m.errors_by_code.items())),
-                "errors_by_type": dict(sorted(m.errors_by_type.items())),
-                "last_ok": _format_timestamp(m.last_ok),
-                "last_error": _format_timestamp(m.last_error) if m.last_error else None,
-                "consecutive_failures": m.consecutive_failures,
-            }
-            group.setdefault(vm, []).append(entry)
+            for (vm, upstream), m in self._upstreams.items():
+                entry: dict[str, Any] = {
+                    "name": upstream,
+                    "status": m.classify(
+                        down_threshold=self.down_threshold,
+                        degraded_threshold=self.degraded_threshold,
+                        degraded_error_pct=self.degraded_error_pct,
+                    ),
+                    "total_requests": m.total_requests,
+                    "success_count": m.success_count,
+                    "error_count": m.error_count,
+                    "error_rate_pct": round(m.error_rate_pct(), 1),
+                    "errors_by_code": dict(sorted(m.errors_by_code.items())),
+                    "errors_by_type": dict(sorted(m.errors_by_type.items())),
+                    "last_ok": _format_timestamp(m.last_ok),
+                    "last_error": _format_timestamp(m.last_error) if m.last_error else None,
+                    "consecutive_failures": m.consecutive_failures,
+                }
+                group.setdefault(vm, []).append(entry)
         return MetricsSnapshot(virtual_models=group)

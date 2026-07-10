@@ -189,6 +189,26 @@ def _validate_circuit_breaker_values(
     return problems
 
 
+def _validate_observability_values(
+    observability: ObservabilityConfigModel | ObservabilityConfig,
+) -> list[str]:
+    problems: list[str] = []
+    if observability.metrics_window < 1:
+        problems.append("observability.metrics_window must be at least 1")
+    if observability.degraded_threshold < 1:
+        problems.append("observability.degraded_threshold must be at least 1")
+    if observability.down_threshold < 1:
+        problems.append("observability.down_threshold must be at least 1")
+    if observability.down_threshold < observability.degraded_threshold:
+        problems.append(
+            "observability.down_threshold must be greater than or equal to "
+            "degraded_threshold"
+        )
+    if not 0 <= observability.degraded_error_pct <= 100:
+        problems.append("observability.degraded_error_pct must be between 0 and 100")
+    return problems
+
+
 def _format_pydantic_error(error: dict[str, Any]) -> str:
     loc = ".".join(str(part) for part in error.get("loc", ())) or "config"
     return f"{loc}: {error.get('msg', 'invalid value')}"
@@ -210,6 +230,7 @@ def _model_from_config_input(cfg: ConfigInput) -> tuple[RouterConfigModel | None
 def _validate_normalized_config(cfg: RouterConfig, env: Mapping[str, str]) -> list[str]:
     problems: list[str] = []
     problems.extend(_validate_circuit_breaker_values(cfg.failover.circuit_breaker))
+    problems.extend(_validate_observability_values(cfg.observability))
     if not cfg.virtual_models:
         problems.append("virtual_models must be a non-empty mapping")
     for virtual_name, virtual in cfg.virtual_models.items():
@@ -241,6 +262,7 @@ def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> l
         return problems
 
     problems.extend(_validate_circuit_breaker_values(model.failover.circuit_breaker))
+    problems.extend(_validate_observability_values(model.observability))
     if not model.virtual_models:
         problems.append("virtual_models must be a non-empty mapping")
     for virtual_name, virtual in model.virtual_models.items():

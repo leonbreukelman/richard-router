@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -64,6 +65,14 @@ class TestUpstreamMetrics:
         assert len(m._window) == 3
         # Window should have 2 True (hits) + 1 False (miss) = 33% error rate
         assert m.error_rate_pct() == pytest.approx(33.3, abs=0.5)
+
+    def test_record_reuses_window_when_size_is_unchanged(self):
+        m = UpstreamMetrics()
+        m.record("success", 200, None, window_size=3)
+        window = m._window
+        m.record("http_error", 503, None, window_size=3)
+        assert m._window is window
+        assert list(m._window) == [True, False]
 
     def test_classify_healthy(self):
         m = UpstreamMetrics()
@@ -241,6 +250,64 @@ class TestMetricsCollector:
             for entry in vm_list:
                 total += entry["total_requests"]
         assert total == n_threads * records_per_thread
+
+    def test_concurrent_snapshot_during_recording(self):
+        """Readers and writers share one lock, so snapshots stay consistent."""
+        c = MetricsCollector(window_size=25)
+        errors: list[BaseException] = []
+        stop = threading.Event()
+        start = threading.Barrier(5)
+        seen_lock = threading.Lock()
+        snapshots_seen = 0
+
+        def writer():
+            try:
+                start.wait()
+                for i in range(2_000):
+                    c.record_attempt(
+                        "vm1",
+                        "upstream-a",
+                        "success" if i % 2 == 0 else "http_error",
+                        200 if i % 2 == 0 else 503,
+                    )
+                    if i % 50 == 0:
+                        time.sleep(0)
+            except BaseException as exc:  # pragma: no cover - assertion reports below
+                errors.append(exc)
+            finally:
+                stop.set()
+
+        def reader():
+            nonlocal snapshots_seen
+            try:
+                start.wait()
+                while not stop.is_set():
+                    snap = c.snapshot()
+                    with seen_lock:
+                        snapshots_seen += 1
+                    for entries in snap.virtual_models.values():
+                        for entry in entries:
+                            assert entry["total_requests"] == (
+                                entry["success_count"] + entry["error_count"]
+                            )
+            except BaseException as exc:  # pragma: no cover - assertion reports below
+                errors.append(exc)
+                stop.set()
+
+        threads = [threading.Thread(target=reader) for _ in range(4)] + [
+            threading.Thread(target=writer)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert snapshots_seen > 0
+        entry = c.snapshot().virtual_models["vm1"][0]
+        assert entry["total_requests"] == 2_000
+        assert entry["success_count"] == 1_000
+        assert entry["error_count"] == 1_000
 
     def test_isolated_upstreams(self):
         """Upstream metrics are isolated per (vm, upstream) key."""

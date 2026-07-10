@@ -148,3 +148,33 @@ def test_circuit_breaker_config_validation_reports_invalid_values():
     assert "failover.circuit_breaker.failure_threshold must be at least 1" in problems
     assert "failover.circuit_breaker.cooldown_seconds must be non-negative" in problems
     assert "failover.circuit_breaker.half_open_max_probes must be at least 1" in problems
+
+def test_observability_config_validation_reports_invalid_values():
+    raw = _provider_reference_config()
+    raw["observability"] = {
+        "metrics_window": 0,
+        "degraded_threshold": 0,
+        "down_threshold": 0,
+        "degraded_error_pct": 101,
+    }
+
+    problems = validate_config(raw, env={"TEST_PROVIDER_API_KEY": "present"})
+
+    assert "observability.metrics_window must be at least 1" in problems
+    assert "observability.degraded_threshold must be at least 1" in problems
+    assert "observability.down_threshold must be at least 1" in problems
+    assert "observability.degraded_error_pct must be between 0 and 100" in problems
+
+def test_observability_config_validation_reports_inverted_thresholds():
+    raw = _provider_reference_config()
+    raw["observability"] = {
+        "degraded_threshold": 3,
+        "down_threshold": 2,
+    }
+
+    problems = validate_config(raw, env={"TEST_PROVIDER_API_KEY": "present"})
+
+    assert (
+        "observability.down_threshold must be greater than or equal to degraded_threshold"
+        in problems
+    )
