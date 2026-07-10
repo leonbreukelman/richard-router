@@ -307,7 +307,11 @@ class RichardRouter:
                             headers=self._diagnostic_headers(upstream),
                         )
                     attempts.append(Attempt(upstream.name, "http_error", response.status_code))
-                    error_message = response.json().get("error", {}).get("message", response.text) if "application/json" in response.headers.get("content-type", "") else response.text
+                    is_json = "application/json" in response.headers.get("content-type", "")
+                    error_data = response.json().get("error", {})
+                    error_message = error_data.get("message", response.text)
+                    if not is_json:
+                        error_message = response.text
                     if self.metrics:
                         self.metrics.record_attempt(
                             virtual.name,

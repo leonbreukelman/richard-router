@@ -211,10 +211,10 @@ def _status_cli(args: argparse.Namespace) -> int:
             # Build error context: most recent code or error type
             error_ctx = ""
             if up.get("errors_by_code"):
-                codes = [str(k) for k in up["errors_by_code"].keys()]
+                codes = [str(k) for k in up["errors_by_code"]]
                 error_ctx = f"Code:{codes[-1]}"
             elif up.get("errors_by_type"):
-                types = [str(k) for k in up["errors_by_type"].keys()]
+                types = [str(k) for k in up["errors_by_type"]]
                 error_ctx = f"Type:{types[-1]}"
             
             last_error_msg = up.get("last_error_message") or ""
@@ -226,7 +226,8 @@ def _status_cli(args: argparse.Namespace) -> int:
             print(
                 f"{vm_col:<20} {up['name']:<30} {up['status']:<11} "
                 f"{up['total_requests']:<8} {up['success_count']:<8} "
-                f"{up['error_count']:<6} {up['error_rate_pct']:<7} {last_active:<22} {error_ctx:<15} {last_error[:19]:<19}"
+                f"{up['error_count']:<6} {up['error_rate_pct']:<7} "
+                f"{last_active:<22} {error_ctx:<15} {last_error[:19]:<19}"
             )
 
     return 0
