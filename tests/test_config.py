@@ -111,6 +111,7 @@ def test_example_file_provider_form_parses_and_documents_inline_backcompat():
         text = config_file.read()
 
     assert list(cfg.virtual_models) == ["coding"]
+    assert cfg.virtual_models["coding"].context_length == 128000
     assert cfg.failover.circuit_breaker.enabled is True
     assert cfg.failover.circuit_breaker.failure_threshold == 5
     assert cfg.failover.circuit_breaker.cooldown_seconds == 30.0

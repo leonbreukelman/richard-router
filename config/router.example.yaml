@@ -41,6 +41,10 @@ observability:
 virtual_models:
   coding:
     owned_by: richard-router
+    # Per-model context window. The router exposes this in GET /v1/models
+    # so Hermes can discover it automatically (discover_models: true).
+    # Defaults to 128000 when omitted.
+    context_length: 128000
     upstreams:
       - name: nvidia-glm-5.2
         provider: nvidia
