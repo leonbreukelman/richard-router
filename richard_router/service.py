@@ -156,7 +156,12 @@ class RichardRouter:
         return {
             "object": "list",
             "data": [
-                {"id": model.name, "object": "model", "owned_by": model.owned_by}
+                {
+                    "id": model.name,
+                    "object": "model",
+                    "owned_by": model.owned_by,
+                    "context_length": model.context_length,
+                }
                 for model in self.config.virtual_models.values()
             ],
         }

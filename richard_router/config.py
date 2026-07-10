@@ -40,6 +40,7 @@ class VirtualModel:
     name: str
     upstreams: tuple[Upstream, ...]
     owned_by: str = "richard-router"
+    context_length: int = 128000
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class VirtualModelConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     owned_by: str = "richard-router"
+    context_length: int = 128000
     upstreams: list[UpstreamConfigModel] = Field(default_factory=list)
 
 
@@ -364,7 +366,8 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
             _normalize_upstream(model.providers, upstream) for upstream in model_cfg.upstreams
         )
         virtual_models[str(model_name)] = VirtualModel(
-            name=str(model_name), upstreams=upstreams, owned_by=str(model_cfg.owned_by)
+            name=str(model_name), upstreams=upstreams, owned_by=str(model_cfg.owned_by),
+            context_length=model_cfg.context_length,
         )
     return RouterConfig(
         virtual_models=virtual_models,

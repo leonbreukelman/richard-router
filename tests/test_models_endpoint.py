@@ -12,7 +12,14 @@ def test_models_endpoint_exposes_only_virtual_model():
     assert response.status_code == 200
     assert response.json() == {
         "object": "list",
-        "data": [{"id": "coding", "object": "model", "owned_by": "richard-router"}],
+        "data": [
+            {
+                "id": "coding",
+                "object": "model",
+                "owned_by": "richard-router",
+                "context_length": 128000,
+            }
+        ],
     }
 
 
