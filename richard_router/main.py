@@ -188,8 +188,8 @@ def _status_cli(args: argparse.Namespace) -> int:
 
     # Terminal table output
     header = (
-        f"{'Virtual Model':<20} {'Pool Member':<30} {'Status':<11} {'Requests':<10} "
-        f"{'Success':<10} {'Errors':<8} {'Err Rate':<9} Last Active"
+        f"{'Virtual Model':<20} {'Pool Member':<30} {'Status':<11} {'Requests':<8} "
+        f"{'Success':<8} {'Errors':<6} {'Err Rate':<7} {'Last Active':<22} Error | Time"
     )
     sep = "─" * len(header)
     print(header)
@@ -205,10 +205,29 @@ def _status_cli(args: argparse.Namespace) -> int:
             if last_active and last_active != "—":
                 # Trim ISO timestamp to readable form
                 last_active = last_active.replace("T", " ").replace("Z", "")
+            last_error = up.get("last_error") or "—"
+            if last_error and last_error != "—":
+                last_error = last_error.replace("T", " ").replace("Z", "")
+            # Build error context: most recent code or error type
+            error_ctx = ""
+            if up.get("errors_by_code"):
+                codes = [str(k) for k in up["errors_by_code"]]
+                error_ctx = f"Code:{codes[-1]}"
+            elif up.get("errors_by_type"):
+                types = [str(k) for k in up["errors_by_type"]]
+                error_ctx = f"Type:{types[-1]}"
+            
+            last_error_msg = up.get("last_error_message") or ""
+            if last_error_msg:
+                # Truncate message to keep column size reasonable
+                msg = (last_error_msg[:25] + '..') if len(last_error_msg) > 27 else last_error_msg
+                error_ctx = f"{error_ctx} {msg}".strip()
+            
             print(
                 f"{vm_col:<20} {up['name']:<30} {up['status']:<11} "
-                f"{up['total_requests']:<10} {up['success_count']:<10} "
-                f"{up['error_count']:<8} {up['error_rate_pct']:<9} {last_active}"
+                f"{up['total_requests']:<8} {up['success_count']:<8} "
+                f"{up['error_count']:<6} {up['error_rate_pct']:<7} "
+                f"{last_active:<22} {error_ctx:<15} {last_error[:19]:<19}"
             )
 
     return 0
