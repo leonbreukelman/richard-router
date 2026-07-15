@@ -253,129 +253,104 @@ class RichardRouter:
             }
         )
 
-    async def chat_completion(self, body: dict[str, Any]) -> RouterResult:
-        virtual_name = str(body.get("model") or "")
-        virtual = self._lookup_model(virtual_name)
-        if virtual is None:
-            self._emit_route_decision(
-                virtual_model=virtual_name,
-                stream=False,
-                outcome="unknown_model",
-                selected_upstream=None,
-                status_code=404,
-                attempts=[],
-            )
-            return self._error_result(404, f"unknown virtual model: {virtual_name}")
+    # ------------------------------------------------------------------
+    # Shared failover helpers — extracted from chat_completion / open_stream
+    # ------------------------------------------------------------------
 
-        attempts: list[Attempt] = []
-        for upstream in virtual.upstreams:
-            for _ in range(self.config.failover.max_attempts_per_upstream):
-                circuit_attempt = self._circuit_open_attempt(upstream)
-                if circuit_attempt is not None:
-                    attempts.append(circuit_attempt)
-                    break
-                client = self._client_for(upstream)
-                try:
-                    response = await client.post(
-                        upstream.chat_completions_url,
-                        json=self._rewrite_body(body, upstream),
-                        headers=self._upstream_headers(upstream),
-                    )
-                    content = response.content
-                    if 200 <= response.status_code < 300:
-                        self._record_upstream_success(upstream)
-                        self._emit_route_decision(
-                            virtual_model=virtual.name,
-                            stream=False,
-                            outcome="success",
-                            selected_upstream=upstream.name,
-                            status_code=response.status_code,
-                            attempts=attempts,
-                        )
-                        if self.metrics:
-                            self.metrics.record_attempt(
-                                virtual.name,
-                                upstream.name,
-                                "success",
-                                status_code=response.status_code,
-                            )
-                        rewritten, media_type = self._rewrite_response_model(content, virtual.name)
-                        return RouterResult(
-                            status_code=response.status_code,
-                            content=rewritten,
-                            media_type=media_type,
-                            headers=self._diagnostic_headers(upstream),
-                        )
-                    attempts.append(Attempt(upstream.name, "http_error", response.status_code))
-                    is_json = "application/json" in response.headers.get("content-type", "")
-                    error_data = response.json().get("error", {})
-                    error_message = error_data.get("message", response.text)
-                    if not is_json:
-                        error_message = response.text
-                    if self.metrics:
-                        self.metrics.record_attempt(
-                            virtual.name,
-                            upstream.name,
-                            "http_error",
-                            status_code=response.status_code,
-                            error_message=error_message,
-                        )
-                    if self._retryable_status(response.status_code):
-                        self._record_retryable_failure(upstream)
-                        continue
-                    self._record_upstream_success(upstream)
-                    self._emit_route_decision(
-                        virtual_model=virtual.name,
-                        stream=False,
-                        outcome="http_error",
-                        selected_upstream=upstream.name,
-                        status_code=response.status_code,
-                        attempts=attempts,
-                    )
-                    return RouterResult(
-                        status_code=response.status_code,
-                        content=content,
-                        media_type=self._content_type(response),
-                        headers=self._diagnostic_headers(upstream),
-                    )
-                except httpx.TimeoutException as exc:
-                    if self._retryable_exception(exc):
-                        self._record_retryable_failure(upstream)
-                    attempts.append(
-                        Attempt(upstream.name, "timeout", error_type="TimeoutException")
-                    )
-                    if self.metrics:
-                        self.metrics.record_attempt(
-                            virtual.name, upstream.name, "timeout", error_type="TimeoutException"
-                        )
-                    if (
-                        not self._retryable_exception(exc)
-                        or not self.config.failover.retry_on_timeout
-                    ):
-                        return self._all_failed(attempts, virtual.name, stream=False)
-                except httpx.TransportError as exc:
-                    if self._retryable_exception(exc):
-                        self._record_retryable_failure(upstream)
-                    attempts.append(
-                        Attempt(
-                            upstream.name,
-                            "connection_error",
-                            error_type=type(exc).__name__,
-                        )
-                    )
-                    if self.metrics:
-                        self.metrics.record_attempt(
-                            virtual.name,
-                            upstream.name,
-                            "connection_error",
-                            error_type=type(exc).__name__,
-                        )
-                    if (
-                        not self._retryable_exception(exc)
-                        or not self.config.failover.retry_on_connection_error
-                    ):
-                        return self._all_failed(attempts, virtual.name, stream=False)
-        return self._all_failed(attempts, virtual.name, stream=False)
+    def _record_success(
+        self,
+        upstream: Upstream,
+        *,
+        virtual_model_name: str,
+        status_code: int,
+        upstream_name: str,
+    ) -> None:
+        """Reset circuit breaker and record success metric for an upstream."""
+        self._record_upstream_success(upstream)
+        if self.metrics:
+            self.metrics.record_attempt(
+                virtual_model_name, upstream_name, "success", status_code=status_code
+            )
+
+    def _record_http_failure(
+        self,
+        upstream: Upstream,
+        response: httpx.Response,
+        attempts: list[Attempt],
+        *,
+        virtual_model_name: str,
+        error_message: str | None = None,
+    ) -> bool:
+        """Record an HTTP-error attempt, update metrics/circuit breaker.
+
+        Returns ``True`` if the failover loop should continue to the next
+        upstream (retryable error), ``False`` if the error is terminal
+        (non-retryable, returned to the caller).
+        """
+        attempts.append(Attempt(upstream.name, "http_error", response.status_code))
+        if self.metrics:
+            self.metrics.record_attempt(
+                virtual_model_name,
+                upstream.name,
+                "http_error",
+                status_code=response.status_code,
+                error_message=error_message,
+            )
+        if self._retryable_status(response.status_code):
+            self._record_retryable_failure(upstream)
+            return True
+        self._record_upstream_success(upstream)
+        return False
+
+    def _record_transport_failure(
+        self,
+        upstream: Upstream,
+        exc: Exception,
+        attempts: list[Attempt],
+        *,
+        virtual_model_name: str,
+    ) -> bool:
+        """Record a transport-level failure (timeout, connection error).
+
+        Returns ``True`` if the failover loop should continue, ``False`` if
+        the error is terminal.
+        """
+        retryable = self._retryable_exception(exc)
+        if retryable:
+            self._record_retryable_failure(upstream)
+
+        if isinstance(exc, httpx.TimeoutException):
+            attempts.append(
+                Attempt(upstream.name, "timeout", error_type="TimeoutException")
+            )
+            if self.metrics:
+                self.metrics.record_attempt(
+                    virtual_model_name, upstream.name, "timeout", error_type="TimeoutException"
+                )
+            return retryable and self.config.failover.retry_on_timeout
+
+        if isinstance(exc, httpx.TransportError):
+            attempts.append(
+                Attempt(
+                    upstream.name,
+                    "connection_error",
+                    error_type=type(exc).__name__,
+                )
+            )
+            if self.metrics:
+                self.metrics.record_attempt(
+                    virtual_model_name,
+                    upstream.name,
+                    "connection_error",
+                    error_type=type(exc).__name__,
+                )
+            return retryable and self.config.failover.retry_on_connection_error
+
+        # Non-httpx exception — record and treat as terminal.
+        attempts.append(
+            Attempt(upstream.name, "error", error_type=type(exc).__name__)
+        )
+        return False
 
     def _all_failed(
         self, attempts: list[Attempt], virtual_model: str, *, stream: bool
@@ -400,6 +375,133 @@ class RichardRouter:
             ).encode("utf-8"),
         )
 
+    async def _failover_loop(
+        self,
+        virtual: VirtualModel,
+        try_upstream: Callable[[Upstream, list[Attempt]], Any],
+        *,
+        stream: bool,
+    ) -> Any:
+        """Shared failover iteration loop.
+
+        ``try_upstream`` is an async callable that takes ``(upstream, attempts)``
+        and returns either:
+        - A ``RouterResult`` or ``RouterStream`` (terminal success/error) → returned immediately.
+        - ``_CONTINUE`` (internal sentinel) → loop continues to next upstream.
+        - Raises ``httpx.TimeoutException`` or ``httpx.TransportError`` → recorded and
+        continuation decided by failover config.
+        """
+        attempts: list[Attempt] = []
+        for upstream in virtual.upstreams:
+            for _ in range(self.config.failover.max_attempts_per_upstream):
+                circuit_attempt = self._circuit_open_attempt(upstream)
+                if circuit_attempt is not None:
+                    attempts.append(circuit_attempt)
+                    break
+                try:
+                    result = await try_upstream(upstream, attempts)
+                except httpx.TimeoutException as exc:
+                    should_continue = self._record_transport_failure(
+                        upstream, exc, attempts, virtual_model_name=virtual.name
+                    )
+                    if not should_continue:
+                        return self._all_failed(attempts, virtual.name, stream=stream)
+                    continue
+                except httpx.TransportError as exc:
+                    should_continue = self._record_transport_failure(
+                        upstream, exc, attempts, virtual_model_name=virtual.name
+                    )
+                    if not should_continue:
+                        return self._all_failed(attempts, virtual.name, stream=stream)
+                    continue
+
+                if result is _CONTINUE:
+                    continue
+                return result
+        return self._all_failed(attempts, virtual.name, stream=stream)
+
+    # ------------------------------------------------------------------
+    # Public API — thin callers over shared failover logic
+    # ------------------------------------------------------------------
+
+    async def chat_completion(self, body: dict[str, Any]) -> RouterResult:
+        virtual_name = str(body.get("model") or "")
+        virtual = self._lookup_model(virtual_name)
+        if virtual is None:
+            self._emit_route_decision(
+                virtual_model=virtual_name,
+                stream=False,
+                outcome="unknown_model",
+                selected_upstream=None,
+                status_code=404,
+                attempts=[],
+            )
+            return self._error_result(404, f"unknown virtual model: {virtual_name}")
+
+        async def try_upstream(upstream: Upstream, attempts: list[Attempt]) -> Any:
+            client = self._client_for(upstream)
+            response = await client.post(
+                upstream.chat_completions_url,
+                json=self._rewrite_body(body, upstream),
+                headers=self._upstream_headers(upstream),
+            )
+            content = response.content
+            if 200 <= response.status_code < 300:
+                self._record_success(
+                    upstream,
+                    virtual_model_name=virtual.name,
+                    status_code=response.status_code,
+                    upstream_name=upstream.name,
+                )
+                self._emit_route_decision(
+                    virtual_model=virtual.name,
+                    stream=False,
+                    outcome="success",
+                    selected_upstream=upstream.name,
+                    status_code=response.status_code,
+                    attempts=attempts,
+                )
+                rewritten, media_type = self._rewrite_response_model(content, virtual.name)
+                return RouterResult(
+                    status_code=response.status_code,
+                    content=rewritten,
+                    media_type=media_type,
+                    headers=self._diagnostic_headers(upstream),
+                )
+
+            # HTTP error — extract error message then record
+            is_json = "application/json" in response.headers.get("content-type", "")
+            error_data = response.json().get("error", {})
+            error_message = error_data.get("message", response.text)
+            if not is_json:
+                error_message = response.text
+
+            should_continue = self._record_http_failure(
+                upstream,
+                response,
+                attempts,
+                virtual_model_name=virtual.name,
+                error_message=error_message,
+            )
+            if not should_continue:
+                self._emit_route_decision(
+                    virtual_model=virtual.name,
+                    stream=False,
+                    outcome="http_error",
+                    selected_upstream=upstream.name,
+                    status_code=response.status_code,
+                    attempts=attempts,
+                )
+                return RouterResult(
+                    status_code=response.status_code,
+                    content=content,
+                    media_type=self._content_type(response),
+                    headers=self._diagnostic_headers(upstream),
+                )
+            return _CONTINUE
+
+        return await self._failover_loop(virtual, try_upstream, stream=False)
+
     async def open_stream(self, body: dict[str, Any]) -> RouterStream | RouterResult:
         virtual_name = str(body.get("model") or "")
         virtual = self._lookup_model(virtual_name)
@@ -414,64 +516,52 @@ class RichardRouter:
             )
             return self._error_result(404, f"unknown virtual model: {virtual_name}")
 
-        attempts: list[Attempt] = []
-        for upstream in virtual.upstreams:
-            for _ in range(self.config.failover.max_attempts_per_upstream):
-                circuit_attempt = self._circuit_open_attempt(upstream)
-                if circuit_attempt is not None:
-                    attempts.append(circuit_attempt)
-                    break
-                client = self._client_for(upstream)
-                stream_cm = client.stream(
-                    "POST",
-                    upstream.chat_completions_url,
-                    json=self._rewrite_body(body, upstream),
-                    headers=self._upstream_headers(upstream),
-                )
-                stream_entered = False
-                try:
-                    response = await stream_cm.__aenter__()
-                    stream_entered = True
-                    if 200 <= response.status_code < 300:
-                        self._record_upstream_success(upstream)
-                        self._emit_route_decision(
-                            virtual_model=virtual.name,
-                            stream=True,
-                            outcome="success",
-                            selected_upstream=upstream.name,
-                            status_code=response.status_code,
-                            attempts=attempts,
-                        )
-                        if self.metrics:
-                            self.metrics.record_attempt(
-                                virtual.name,
-                                upstream.name,
-                                "success",
-                                status_code=response.status_code,
-                            )
-                        media_type = self._content_type(response, "text/event-stream")
-                        iterator = self._stream_iterator(response, stream_cm, virtual.name)
-                        return RouterStream(
-                            iterator=iterator,
-                            media_type=media_type,
-                            headers=self._diagnostic_headers(upstream),
-                        )
+        async def try_upstream(upstream: Upstream, attempts: list[Attempt]) -> Any:
+            client = self._client_for(upstream)
+            stream_cm = client.stream(
+                "POST",
+                upstream.chat_completions_url,
+                json=self._rewrite_body(body, upstream),
+                headers=self._upstream_headers(upstream),
+            )
+            stream_entered = False
+            try:
+                response = await stream_cm.__aenter__()
+                stream_entered = True
+                if 200 <= response.status_code < 300:
+                    self._record_success(
+                        upstream,
+                        virtual_model_name=virtual.name,
+                        status_code=response.status_code,
+                        upstream_name=upstream.name,
+                    )
+                    self._emit_route_decision(
+                        virtual_model=virtual.name,
+                        stream=True,
+                        outcome="success",
+                        selected_upstream=upstream.name,
+                        status_code=response.status_code,
+                        attempts=attempts,
+                    )
+                    media_type = self._content_type(response, "text/event-stream")
+                    iterator = self._stream_iterator(response, stream_cm, virtual.name)
+                    return RouterStream(
+                        iterator=iterator,
+                        media_type=media_type,
+                        headers=self._diagnostic_headers(upstream),
+                    )
 
-                    content = await response.aread()
-                    await stream_cm.__aexit__(None, None, None)
-                    stream_entered = False
-                    attempts.append(Attempt(upstream.name, "http_error", response.status_code))
-                    if self.metrics:
-                        self.metrics.record_attempt(
-                            virtual.name,
-                            upstream.name,
-                            "http_error",
-                            status_code=response.status_code,
-                        )
-                    if self._retryable_status(response.status_code):
-                        self._record_retryable_failure(upstream)
-                        continue
-                    self._record_upstream_success(upstream)
+                content = await response.aread()
+                await stream_cm.__aexit__(None, None, None)
+                stream_entered = False
+
+                should_continue = self._record_http_failure(
+                    upstream,
+                    response,
+                    attempts,
+                    virtual_model_name=virtual.name,
+                )
+                if not should_continue:
                     self._emit_route_decision(
                         virtual_model=virtual.name,
                         stream=True,
@@ -486,49 +576,17 @@ class RichardRouter:
                         media_type=self._content_type(response),
                         headers=self._diagnostic_headers(upstream),
                     )
-                except httpx.TimeoutException as exc:
-                    if stream_entered:
-                        await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
-                    if self._retryable_exception(exc):
-                        self._record_retryable_failure(upstream)
-                    attempts.append(
-                        Attempt(upstream.name, "timeout", error_type="TimeoutException")
-                    )
-                    if self.metrics:
-                        self.metrics.record_attempt(
-                            virtual.name, upstream.name, "timeout", error_type="TimeoutException"
-                        )
-                    if (
-                        not self._retryable_exception(exc)
-                        or not self.config.failover.retry_on_timeout
-                    ):
-                        return self._all_failed(attempts, virtual.name, stream=True)
-                except httpx.TransportError as exc:
-                    if stream_entered:
-                        await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
-                    if self._retryable_exception(exc):
-                        self._record_retryable_failure(upstream)
-                    attempts.append(
-                        Attempt(
-                            upstream.name,
-                            "connection_error",
-                            error_type=type(exc).__name__,
-                        )
-                    )
-                    if self.metrics:
-                        self.metrics.record_attempt(
-                            virtual.name,
-                            upstream.name,
-                            "connection_error",
-                            error_type=type(exc).__name__,
-                        )
-                    if (
-                        not self._retryable_exception(exc)
-                        or not self.config.failover.retry_on_connection_error
-                    ):
-                        return self._all_failed(attempts, virtual.name, stream=True)
+                return _CONTINUE
+            except httpx.TimeoutException as exc:
+                if stream_entered:
+                    await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                raise
+            except httpx.TransportError as exc:
+                if stream_entered:
+                    await stream_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                raise
 
-        return self._all_failed(attempts, virtual.name, stream=True)
+        return await self._failover_loop(virtual, try_upstream, stream=True)
 
     @staticmethod
     def _rewrite_sse_chunk(chunk: bytes, virtual_model: str) -> bytes:
@@ -571,3 +629,13 @@ class RichardRouter:
                 yield RichardRouter._rewrite_sse_chunk(chunk, virtual_model)
         finally:
             await stream_cm.__aexit__(None, None, None)
+
+
+class _ContinueSentinel:
+    """Sentinel returned by ``try_upstream`` callbacks to signal 'continue to next upstream'."""
+
+    def __repr__(self) -> str:
+        return "<_CONTINUE>"
+
+
+_CONTINUE = _ContinueSentinel()
