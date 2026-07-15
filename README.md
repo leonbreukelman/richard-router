@@ -102,6 +102,83 @@ provider/model circuit after five consecutive failures, skip it for 30 seconds,
 then allow one half-open probe. A successful probe closes the circuit again.
 Caller/configuration errors such as 400/401/403/422 do not open the breaker.
 
+## Load balancing
+
+Upstreams can be grouped into **priority tiers** and distributed by **weight**
+within each tier. This replaces the simple list-order fallback with a true
+load-balanced pool.
+
+### Priority tiers
+
+Each upstream has a `priority` field (integer, default `1`, lower = higher
+priority). Upstreams are grouped by priority into tiers, and tiers are tried in
+ascending order. Only after every upstream in tier 1 has been exhausted does
+the router try tier 2.
+
+```yaml
+upstreams:
+  # Tier 1 — tried first
+  - name: primary
+    ...
+    priority: 1
+
+  # Tier 2 — only tried if all tier-1 upstreams are down
+  - name: backup
+    ...
+    priority: 2
+```
+
+### Weighted distribution
+
+Within a tier, traffic is distributed by `weight` (integer, default `100`,
+minimum `1`). A weight of 70 gets 70% of requests, a weight of 30 gets 30%.
+
+```yaml
+upstreams:
+  - name: nvidia-glm
+    priority: 1
+    weight: 70    # 70% of requests
+
+  - name: openrouter-glm
+    priority: 1
+    weight: 30    # 30% of requests
+```
+
+If all upstreams in a tier have the same weight (including the default of 100),
+the router falls back to deterministic list-order iteration — the same behavior
+as the original router. You only get load balancing when you set different
+weights.
+
+### Putting it together
+
+```yaml
+upstreams:
+  # Tier 1 — load-balanced pool (70/30 split)
+  - name: nvidia-glm
+    provider: nvidia
+    model: z-ai/glm-5.2
+    priority: 1
+    weight: 70
+
+  - name: openrouter-glm
+    provider: openrouter
+    model: z-ai/glm-5.2
+    priority: 1
+    weight: 30
+
+  # Tier 2 — fallback, only used if both tier-1 upstreams are down
+  - name: deepseek-backup
+    provider: deepseek
+    model: deepseek-chat
+    priority: 2
+    weight: 100
+```
+
+When a circuit breaker opens for an upstream, it is removed from the active
+pool until the circuit closes.  The remaining upstreams in the same tier
+continue to share traffic proportionally.  When every upstream in a tier is
+unavailable, the router falls through to the next priority tier.
+
 ## Streaming
 
 Streaming requests are passed through. Failover can happen before the upstream

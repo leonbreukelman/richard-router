@@ -46,12 +46,29 @@ virtual_models:
     # Defaults to 128000 when omitted.
     context_length: 128000
     upstreams:
+      # --- Load-balanced pool (priority 1, tier 1) ---
+      # Both upstreams share priority 1. Traffic is distributed by weight:
+      # NVIDIA gets 70% of requests, OpenRouter gets 30%.
       - name: nvidia-glm-5.2
         provider: nvidia
         model: z-ai/glm-5.2
+        priority: 1
+        weight: 70
+
       - name: openrouter-glm-5.2
         provider: openrouter
         model: z-ai/glm-5.2
+        priority: 1
+        weight: 30
+
+      # --- Fallback tier (priority 2) ---
+      # Only tried if all priority-1 upstreams are unhealthy.
+      # Weight defaults to 100 when omitted.
+      # - name: deepseek-fallback
+      #   base_url: https://api.deepseek.com/v1
+      #   api_key_env: DEEPSEEK_API_KEY
+      #   model: deepseek-chat
+      #   priority: 2
 
       # Legacy inline form remains supported for back-compat:
       # - name: inline-compatible-example

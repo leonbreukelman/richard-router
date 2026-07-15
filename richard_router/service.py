@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -122,6 +123,18 @@ class RichardRouter:
             return Attempt(upstream.name, "circuit_open")
         state.half_open_probes += 1
         return None
+
+    def _circuit_allows_traffic(self, upstream: Upstream) -> bool:
+        """Check if the upstream's circuit breaker allows traffic, without side effects."""
+        cfg = self.config.failover.circuit_breaker
+        if not cfg.enabled:
+            return True
+        state = self._circuit_breaker_state(upstream)
+        if state.opened_at is None:
+            return True
+        if self.clock() - state.opened_at < cfg.cooldown_seconds:
+            return False
+        return state.half_open_probes < cfg.half_open_max_probes
 
     def _record_upstream_success(self, upstream: Upstream) -> None:
         if not self.config.failover.circuit_breaker.enabled:
@@ -375,6 +388,37 @@ class RichardRouter:
             ).encode("utf-8"),
         )
 
+    @staticmethod
+    def _select_upstreams_by_tier(
+        upstreams: tuple[Upstream, ...],
+    ) -> list[tuple[int, list[Upstream]]]:
+        """Group upstreams by priority tier, sorted ascending.
+
+        Returns [(1, [up_a, up_b]), (2, [up_c]), ...] where lower priority
+        values are tried first.
+        """
+        tiers: dict[int, list[Upstream]] = {}
+        for upstream in upstreams:
+            tiers.setdefault(upstream.priority, []).append(upstream)
+        return sorted(tiers.items())
+
+    @staticmethod
+    def _pick_weighted_upstream(active: list[Upstream]) -> Upstream:
+        """Pick an upstream from a list using weighted random selection.
+
+        An upstream with ``weight=70`` is 7× more likely to be picked than
+        one with ``weight=10``.  When all weights are equal the selection is
+        uniform random.
+        """
+        total = sum(u.weight for u in active)
+        target = random.random() * total
+        cumulative = 0.0
+        for upstream in active:
+            cumulative += upstream.weight
+            if target <= cumulative:
+                return upstream
+        return active[-1]
+
     async def _failover_loop(
         self,
         virtual: VirtualModel,
@@ -382,43 +426,93 @@ class RichardRouter:
         *,
         stream: bool,
     ) -> Any:
-        """Shared failover iteration loop.
+        """Shared failover iteration loop with priority tiers and weighted selection.
 
         ``try_upstream`` is an async callable that takes ``(upstream, attempts)``
         and returns either:
         - A ``RouterResult`` or ``RouterStream`` (terminal success/error) → returned immediately.
-        - ``_CONTINUE`` (internal sentinel) → loop continues to next upstream.
+        - ``_CONTINUE`` (internal sentinel) → loop retries or re-picks from the tier.
         - Raises ``httpx.TimeoutException`` or ``httpx.TransportError`` → recorded and
         continuation decided by failover config.
+
+        Upstreams are first grouped by priority tier (lower = higher priority).
+        Within a tier, upstreams are selected by weight.  Only upstreams whose
+        circuit breaker allows traffic are in the active pool.  When a tier
+        is exhausted the loop falls through to the next lower priority tier.
         """
         attempts: list[Attempt] = []
-        for upstream in virtual.upstreams:
-            for _ in range(self.config.failover.max_attempts_per_upstream):
-                circuit_attempt = self._circuit_open_attempt(upstream)
-                if circuit_attempt is not None:
-                    attempts.append(circuit_attempt)
-                    break
-                try:
-                    result = await try_upstream(upstream, attempts)
-                except httpx.TimeoutException as exc:
-                    should_continue = self._record_transport_failure(
-                        upstream, exc, attempts, virtual_model_name=virtual.name
-                    )
-                    if not should_continue:
-                        return self._all_failed(attempts, virtual.name, stream=stream)
-                    continue
-                except httpx.TransportError as exc:
-                    should_continue = self._record_transport_failure(
-                        upstream, exc, attempts, virtual_model_name=virtual.name
-                    )
-                    if not should_continue:
-                        return self._all_failed(attempts, virtual.name, stream=stream)
-                    continue
+        tiers = self._select_upstreams_by_tier(virtual.upstreams)
 
-                if result is _CONTINUE:
-                    continue
-                return result
+        for _priority, tier in tiers:
+            # Detect uniform weights — fall back to list-order iteration
+            # for backward compatibility with existing deterministic tests.
+            weights = {u.weight for u in tier}
+            uniform = len(weights) == 1
+
+            if uniform:
+                for upstream in tier:
+                    if not self._circuit_allows_traffic(upstream):
+                        attempts.append(Attempt(upstream.name, "circuit_open"))
+                        continue
+                    inner_result = await self._failover_upstream(
+                        upstream, try_upstream, attempts, virtual, stream=stream
+                    )
+                    if inner_result is not None:
+                        return inner_result
+            else:
+                while True:
+                    active = [u for u in tier if self._circuit_allows_traffic(u)]
+                    if not active:
+                        break
+                    upstream = self._pick_weighted_upstream(active)
+                    inner_result = await self._failover_upstream(
+                        upstream, try_upstream, attempts, virtual, stream=stream
+                    )
+                    if inner_result is not None:
+                        return inner_result
         return self._all_failed(attempts, virtual.name, stream=stream)
+
+    async def _failover_upstream(
+        self,
+        upstream: Upstream,
+        try_upstream: Callable[[Upstream, list[Attempt]], Any],
+        attempts: list[Attempt],
+        virtual: VirtualModel,
+        *,
+        stream: bool,
+    ) -> Any | None:
+        """Try an upstream with ``max_attempts_per_upstream`` retries.
+
+        Returns ``None`` when all retries are exhausted (caller should try
+        the next upstream or tier), or a ``RouterResult`` / ``RouterStream``
+        when the outcome is terminal (success or non-retryable error).
+        """
+        for _ in range(self.config.failover.max_attempts_per_upstream):
+            circuit_attempt = self._circuit_open_attempt(upstream)
+            if circuit_attempt is not None:
+                attempts.append(circuit_attempt)
+                return None
+            try:
+                result = await try_upstream(upstream, attempts)
+            except httpx.TimeoutException as exc:
+                should_continue = self._record_transport_failure(
+                    upstream, exc, attempts, virtual_model_name=virtual.name
+                )
+                if not should_continue:
+                    return self._all_failed(attempts, virtual.name, stream=stream)
+                continue
+            except httpx.TransportError as exc:
+                should_continue = self._record_transport_failure(
+                    upstream, exc, attempts, virtual_model_name=virtual.name
+                )
+                if not should_continue:
+                    return self._all_failed(attempts, virtual.name, stream=stream)
+                continue
+
+            if result is _CONTINUE:
+                continue
+            return result
+        return None
 
     # ------------------------------------------------------------------
     # Public API — thin callers over shared failover logic
