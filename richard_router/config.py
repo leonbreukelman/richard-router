@@ -25,6 +25,8 @@ class Upstream:
     connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
     pool_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
+    priority: int = 1
+    weight: int = 100
 
     @property
     def chat_completions_url(self) -> str:
@@ -107,6 +109,8 @@ class UpstreamConfigModel(BaseModel):
     connect_timeout_seconds: float | None = None
     write_timeout_seconds: float | None = None
     pool_timeout_seconds: float | None = None
+    priority: int = 1
+    weight: int = 100
 
 
 class VirtualModelConfigModel(BaseModel):
@@ -248,6 +252,10 @@ def _validate_normalized_config(cfg: RouterConfig, env: Mapping[str, str]) -> li
                 problems.append(
                     f"{prefix} env var {upstream.api_key_env} is not set"
                 )
+            if upstream.priority < 1:
+                problems.append(f"{prefix}.priority must be at least 1")
+            if upstream.weight < 1:
+                problems.append(f"{prefix}.weight must be at least 1")
     return problems
 
 
@@ -292,6 +300,10 @@ def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> l
                         problems.append(f"{prefix}.{required} is required for inline upstreams")
             if api_key_env and not _env_has_value(effective_env, api_key_env):
                 problems.append(f"{prefix} env var {api_key_env} is not set")
+            if upstream.priority < 1:
+                problems.append(f"{prefix}.priority must be at least 1")
+            if upstream.weight < 1:
+                problems.append(f"{prefix}.weight must be at least 1")
     return problems
 
 
@@ -364,6 +376,8 @@ def _normalize_upstream(
             provider.pool_timeout_seconds if provider else None,
             default=DEFAULT_READ_TIMEOUT_SECONDS,
         ),
+        priority=max(1, int(upstream.priority)),
+        weight=max(1, int(upstream.weight)),
     )
 
 
