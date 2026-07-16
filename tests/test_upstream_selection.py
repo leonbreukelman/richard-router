@@ -1,6 +1,8 @@
 """Tests for weighted priority-tier upstream selection."""
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -291,3 +293,143 @@ def test_load_config_defaults():
     upstream = cfg.virtual_models["test"].upstreams[0]
     assert upstream.priority == 1
     assert upstream.weight == 100
+
+
+# ---------------------------------------------------------------------------
+# Weighted failover loop: retry/exhaustion behavior
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_weighted_branch_tries_each_upstream_once_on_retryable():
+    """In the non-uniform (weighted) branch, a retryable failure should move to
+    the next upstream rather than re-picking the same one until its circuit
+    breaker opens. With max_attempts_per_upstream=1, each upstream is tried once."""
+    from richard_router.service import _CONTINUE, Attempt
+
+    calls: list[str] = []
+    config = RouterConfig(
+        virtual_models={
+            "coding": VirtualModel(
+                name="coding",
+                upstreams=(
+                    Upstream(
+                        name="heavy", base_url="https://h.test",
+                        model="h", priority=1, weight=70,
+                    ),
+                    Upstream(
+                        name="light", base_url="https://l.test",
+                        model="l", priority=1, weight=30,
+                    ),
+                ),
+            )
+        },
+        observability=ObservabilityConfig(expose_upstream_header=True),
+    )
+
+    async def try_up(upstream, attempts):
+        calls.append(upstream.name)
+        attempts.append(Attempt(upstream.name, "http_error", 503))
+        router._record_http_failure(
+            upstream,
+            type("FakeResponse", (), {"status_code": 503})(),
+            attempts,
+            virtual_model_name="coding",
+        )
+        return _CONTINUE
+
+    router = RichardRouter(config, _client_factory(lambda r: httpx.Response(503)))
+    virtual = config.virtual_models["coding"]
+    result = await router._failover_loop(virtual, try_up, stream=False)
+    assert result.status_code == 503
+    # Each upstream tried exactly once, not 5 times (until circuit opens).
+    assert calls.count("heavy") == 1
+    assert calls.count("light") == 1
+
+
+@pytest.mark.asyncio
+async def test_weighted_branch_terminates_under_sustained_retryable_errors():
+    """Regression for the infinite-loop bug: when all weighted upstreams keep
+    returning retryable errors, the loop must terminate after trying each once."""
+    from richard_router.service import _CONTINUE, Attempt
+
+    calls: list[str] = []
+    config = RouterConfig(
+        virtual_models={
+            "coding": VirtualModel(
+                name="coding",
+                upstreams=(
+                    Upstream(
+                        name="a", base_url="https://a.test",
+                        model="a", priority=1, weight=70,
+                    ),
+                    Upstream(
+                        name="b", base_url="https://b.test",
+                        model="b", priority=1, weight=30,
+                    ),
+                ),
+            )
+        },
+        observability=ObservabilityConfig(),
+    )
+
+    async def try_up(upstream, attempts):
+        calls.append(upstream.name)
+        attempts.append(Attempt(upstream.name, "test"))
+        return _CONTINUE
+
+    router = RichardRouter(config, _client_factory(lambda r: httpx.Response(500)))
+    virtual = config.virtual_models["coding"]
+    result = await asyncio.wait_for(
+        router._failover_loop(virtual, try_up, stream=False),
+        timeout=3.0,
+    )
+    assert result.status_code == 503  # _all_failed default for exhausted attempts
+    # No upstream retried more than once.
+    assert calls.count("a") == 1
+    assert calls.count("b") == 1
+
+
+@pytest.mark.asyncio
+async def test_weighted_branch_distributes_by_weight_over_many_calls():
+    """Distribution sanity check for weighted selection across many requests."""
+    picks = {"heavy": 0, "light": 0}
+    config = RouterConfig(
+        virtual_models={
+            "coding": VirtualModel(
+                name="coding",
+                upstreams=(
+                    Upstream(
+                        name="heavy", base_url="https://h.test",
+                        model="h", priority=1, weight=70,
+                    ),
+                    Upstream(
+                        name="light", base_url="https://l.test",
+                        model="l", priority=1, weight=30,
+                    ),
+                ),
+            )
+        },
+        observability=ObservabilityConfig(expose_upstream_header=True),
+    )
+
+    async def try_up(upstream, attempts):
+        # Always succeed so the loop returns immediately after one pick.
+        # Mirror chat_completion's real behavior: attach the upstream diagnostic
+        # header on success when observability exposes it.
+        return RouterResult(
+            status_code=200,
+            content=b'{"ok":true}',
+            headers=router._diagnostic_headers(upstream),
+        )
+
+    router = RichardRouter(config, _client_factory(lambda r: httpx.Response(200)))
+    virtual = config.virtual_models["coding"]
+    for _ in range(1000):
+        result = await router._failover_loop(virtual, try_up, stream=False)
+        assert result.status_code == 200
+        # The chosen upstream is recorded in the last attempt's diagnostic header
+        # via the success path; instead we infer from upstream header.
+        picks[result.headers["x-richard-router-upstream"]] += 1
+    assert 620 <= picks["heavy"] <= 780
+    assert 220 <= picks["light"] <= 380
