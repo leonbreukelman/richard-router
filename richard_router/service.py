@@ -460,8 +460,12 @@ class RichardRouter:
                     if inner_result is not None:
                         return inner_result
             else:
-                while True:
-                    active = [u for u in tier if self._circuit_allows_traffic(u)]
+                # Non-uniform weights: pick by weight and drop an upstream from
+                # the candidate pool once it has exhausted its retries, so the
+                # loop does not re-pick a failing upstream indefinitely.
+                remaining: list[Upstream] = list(tier)
+                while remaining:
+                    active = [u for u in remaining if self._circuit_allows_traffic(u)]
                     if not active:
                         break
                     upstream = self._pick_weighted_upstream(active)
@@ -470,6 +474,9 @@ class RichardRouter:
                     )
                     if inner_result is not None:
                         return inner_result
+                    # Upstream exhausted its retries (or its circuit opened) —
+                    # remove it so the loop moves to the next candidate.
+                    remaining = [u for u in remaining if u is not upstream]
         return self._all_failed(attempts, virtual.name, stream=stream)
 
     async def _failover_upstream(
