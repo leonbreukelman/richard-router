@@ -223,3 +223,14 @@ uv run dotenv -f ~/.hermes/.env run -- python scripts/live_smoke.py --config con
 
 The live smoke sends tiny prompts and prints only provider/model/upstream status,
 not secrets.
+
+## Config guardrails
+
+- **Validate before starting:** `uv run python -m richard_router.main validate --config config/router.yaml` parses and validates the config and prints any problems. Run this after editing the config to catch errors before they surface as a server 500.
+- **YAML tabs are rejected at commit time:** a pre-commit hook (`scripts/git-hooks/pre-commit`) blocks tabs in any staged `.yaml`/`.yml` file, because YAML forbids tab indentation and a single tab causes a parse failure at startup. Install it once after cloning:
+
+  ```bash
+  ln -sf ../../scripts/git-hooks/pre-commit .git/hooks/pre-commit
+  ```
+
+- **Malformed config fails safe at runtime:** if the config cannot be parsed or validated, the server still starts and answers every route with a `503` containing the specific error (e.g. the line/column of a tab) instead of crashing with an unhelpful traceback. Fix the config and restart.
