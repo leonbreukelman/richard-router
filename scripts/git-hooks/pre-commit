@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Pre-commit hook: reject tabs in staged YAML files.
+# YAML forbids tab indentation; a single tab causes a 500 at server start.
+# This catches it at commit time with a clear message instead.
+set -euo pipefail
+
+# Find staged .yaml/.yml files
+staged_yaml=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ya?ml)$' || true)
+
+if [ -z "$staged_yaml" ]; then
+    exit 0
+fi
+
+bad_files=""
+for f in $staged_yaml; do
+    # Only scan files that exist (skip deletions)
+    [ -f "$f" ] || continue
+    if grep -Pn '\t' "$f" >/dev/null 2>&1; then
+        if [ -z "$bad_files" ]; then
+            bad_files="$f"
+        else
+            bad_files="$bad_files
+$f"
+        fi
+    fi
+done
+
+if [ -n "$bad_files" ]; then
+    echo "ERROR: tab characters found in YAML files (YAML forbids tab indentation):" >&2
+    echo "$bad_files" >&2
+    echo "" >&2
+    echo "Fix: replace tabs with spaces, then 'git add' and commit again." >&2
+    echo "To find them: grep -Pn '\\\\t' <file>" >&2
+    exit 1
+fi
+
+exit 0

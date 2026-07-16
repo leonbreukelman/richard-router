@@ -28,11 +28,46 @@ def _check_auth(request: Request, config: RouterConfig) -> None:
     raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _create_config_error_app(exc: Exception) -> FastAPI:
+    """Return a FastAPI app that reports a config-load failure on every route.
+
+    This prevents the whole server from crashing with an unhelpful 500 traceback
+    when the YAML config is malformed (e.g. a tab character in indentation). The
+    server still starts and answers requests with a clear, actionable 503.
+    """
+    message = str(exc).strip() or exc.__class__.__name__
+    app = FastAPI(title="richard-router", version="0.1.0")
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"ok": False, "config_error": message}
+
+    async def _config_error(request: Request) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "router config failed to load",
+                "detail": message,
+                "hint": "Fix the config file and restart the server. "
+                "Run 'uv run python -m richard_router.main validate --config config/router.yaml' "
+                "to check before restarting.",
+            },
+        )
+
+    for path in ("/v1/models", "/v1/pool", "/v1/chat/completions"):
+        app.add_api_route(path, _config_error, methods=["GET", "POST"])
+    return app
+
+
 def create_app(
     config: RouterConfig | None = None,
     client_factory: ClientFactory | None = None,
 ) -> FastAPI:
-    cfg = config or load_config()
+    try:
+        cfg = config or load_config()
+    except Exception as exc:  # noqa: BLE001 — surface config errors as a clear 503
+        return _create_config_error_app(exc)
+
     obs = cfg.observability
     metrics = MetricsCollector(
         window_size=obs.metrics_window,

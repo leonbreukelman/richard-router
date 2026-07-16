@@ -323,7 +323,16 @@ def _resolve_config_path(path: str | Path | None = None) -> Path:
 
 def read_config_data(path: str | Path | None = None) -> dict[str, Any]:
     config_path = _resolve_config_path(path)
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        hint = str(exc).strip()
+        if "\t" in hint:
+            hint = (
+                "YAML does not allow tab characters for indentation — "
+                "replace tabs with spaces. " + hint
+            )
+        raise ValueError(f"failed to parse YAML config {config_path}:\n{hint}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping: {config_path}")
     return raw
