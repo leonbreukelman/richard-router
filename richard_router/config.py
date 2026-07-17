@@ -73,10 +73,20 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True)
+class HealthCheckConfig:
+    enabled: bool = False
+    interval_seconds: float = 60.0
+    probe_max_tokens: int = 1
+    probe_timeout_seconds: float = 10.0
+    probe_statuses: tuple[str, ...] = ("degraded", "down")
+
+
+@dataclass(frozen=True)
 class RouterConfig:
     virtual_models: dict[str, VirtualModel]
     failover: FailoverConfig = field(default_factory=FailoverConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    health_check: HealthCheckConfig = field(default_factory=HealthCheckConfig)
     inbound_api_key_env: str = ""
 
     @property
@@ -151,6 +161,16 @@ class ObservabilityConfigModel(BaseModel):
     degraded_error_pct: float = 20.0
 
 
+class HealthCheckConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    interval_seconds: float = 60.0
+    probe_max_tokens: int = 1
+    probe_timeout_seconds: float = 10.0
+    probe_statuses: list[str] = Field(default_factory=lambda: ["degraded", "down"])
+
+
 class AuthConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -164,6 +184,7 @@ class RouterConfigModel(BaseModel):
     virtual_models: dict[str, VirtualModelConfigModel] = Field(default_factory=dict)
     failover: FailoverConfigModel = Field(default_factory=FailoverConfigModel)
     observability: ObservabilityConfigModel = Field(default_factory=ObservabilityConfigModel)
+    health_check: HealthCheckConfigModel = Field(default_factory=HealthCheckConfigModel)
     auth: AuthConfigModel = Field(default_factory=AuthConfigModel)
 
 
@@ -213,6 +234,30 @@ def _validate_observability_values(
     return problems
 
 
+_VALID_PROBE_STATUSES = {"healthy", "degraded", "down"}
+
+
+def _validate_health_check_values(
+    health_check: HealthCheckConfigModel | HealthCheckConfig,
+) -> list[str]:
+    problems: list[str] = []
+    if health_check.interval_seconds < 5.0:
+        problems.append("health_check.interval_seconds must be at least 5.0")
+    if health_check.probe_max_tokens < 1:
+        problems.append("health_check.probe_max_tokens must be at least 1")
+    if health_check.probe_timeout_seconds < 1.0:
+        problems.append("health_check.probe_timeout_seconds must be at least 1.0")
+    if not health_check.probe_statuses:
+        problems.append("health_check.probe_statuses must not be empty")
+    for status in health_check.probe_statuses:
+        if status not in _VALID_PROBE_STATUSES:
+            problems.append(
+                f"health_check.probe_statuses contains unknown status: {status} "
+                f"(valid: {', '.join(sorted(_VALID_PROBE_STATUSES))})"
+            )
+    return problems
+
+
 def _format_pydantic_error(error: dict[str, Any]) -> str:
     loc = ".".join(str(part) for part in error.get("loc", ())) or "config"
     return f"{loc}: {error.get('msg', 'invalid value')}"
@@ -235,6 +280,7 @@ def _validate_normalized_config(cfg: RouterConfig, env: Mapping[str, str]) -> li
     problems: list[str] = []
     problems.extend(_validate_circuit_breaker_values(cfg.failover.circuit_breaker))
     problems.extend(_validate_observability_values(cfg.observability))
+    problems.extend(_validate_health_check_values(cfg.health_check))
     if not cfg.virtual_models:
         problems.append("virtual_models must be a non-empty mapping")
     for virtual_name, virtual in cfg.virtual_models.items():
@@ -271,6 +317,7 @@ def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> l
 
     problems.extend(_validate_circuit_breaker_values(model.failover.circuit_breaker))
     problems.extend(_validate_observability_values(model.observability))
+    problems.extend(_validate_health_check_values(model.health_check))
     if not model.virtual_models:
         problems.append("virtual_models must be a non-empty mapping")
     for virtual_name, virtual in model.virtual_models.items():
@@ -414,6 +461,16 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
             name=str(model_name), upstreams=upstreams, owned_by=str(model_cfg.owned_by),
             context_length=model_cfg.context_length,
         )
+
+    hc = model.health_check
+    health_check = HealthCheckConfig(
+        enabled=bool(hc.enabled),
+        interval_seconds=max(5.0, float(hc.interval_seconds)),
+        probe_max_tokens=max(1, int(hc.probe_max_tokens)),
+        probe_timeout_seconds=max(1.0, float(hc.probe_timeout_seconds)),
+        probe_statuses=tuple(str(s) for s in hc.probe_statuses),
+    )
+
     return RouterConfig(
         virtual_models=virtual_models,
         failover=failover,
@@ -425,6 +482,7 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
             down_threshold=int(model.observability.down_threshold),
             degraded_error_pct=float(model.observability.degraded_error_pct),
         ),
+        health_check=health_check,
         inbound_api_key_env=str(model.auth.api_key_env or ""),
     )
 

@@ -38,6 +38,16 @@ observability:
   # are never logged and metadata is redacted before emission.
   decision_log_enabled: true
 
+# Optional health-check task — probes degraded/down pool members at a regular
+# interval so their status updates without waiting for real traffic.
+# Enabled by default after explicitly setting enabled: true.
+# health_check:
+#   enabled: false
+#   interval_seconds: 60        # How often to run the probe cycle
+#   probe_max_tokens: 1         # Minimal token cost per probe
+#   probe_timeout_seconds: 10   # Per-probe timeout (fail fast)
+#   probe_statuses: ["degraded", "down"]  # Which statuses trigger a probe
+
 virtual_models:
   coding:
     owned_by: richard-router

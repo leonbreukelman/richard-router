@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import random
@@ -10,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from richard_router.config import RouterConfig, Upstream, VirtualModel
+from richard_router.config import HealthCheckConfig, RouterConfig, Upstream, VirtualModel
 from richard_router.errors import classify_exception, classify_status
 from richard_router.metrics import MetricsCollector
 from richard_router.redaction import redact
@@ -740,3 +742,153 @@ class _ContinueSentinel:
 
 
 _CONTINUE = _ContinueSentinel()
+
+
+class HealthCheckTask:
+    """Background asyncio task that periodically probes degraded/down pool members.
+
+    On each tick, the task examines the current metrics snapshot, identifies
+    upstreams whose ``classify()`` status is in ``probe_statuses``, and sends
+    a minimal chat-completion probe directly to the upstream's API using the
+    router's own httpx client.  Probe outcomes are recorded through the
+    metrics pipeline so ``/v1/pool`` and ``richard-router status`` reflect
+    the recovery — including clearing stale error state on success.
+    """
+
+    def __init__(
+        self,
+        router: RichardRouter,
+        config: HealthCheckConfig,
+        metrics: MetricsCollector,
+    ) -> None:
+        self._router = router
+        self._config = config
+        self._metrics = metrics
+        self._task: asyncio.Task[None] | None = None
+        self._stop_event = asyncio.Event()
+
+    def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._stop_event.clear()
+        self._task = asyncio.create_task(self._run(), name="richard-router-health-check")
+        logger.info(
+            "health check task started (interval=%ss)", self._config.interval_seconds
+        )
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        self._task = None
+        logger.info("health check task stopped")
+
+    async def _run(self) -> None:
+        """Main loop: tick, sleep interval, repeat until stopped."""
+        while not self._stop_event.is_set():
+            try:
+                await self._tick()
+            except Exception:
+                logger.warning("richard_router.health_check_tick_failed", exc_info=True)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self._config.interval_seconds
+                )
+
+    async def _tick(self) -> None:
+        """Probe all upstreams whose status is in ``probe_statuses``."""
+        snapshot = self._metrics.snapshot()
+        probe_statuses = set(self._config.probe_statuses)
+        cfg = self._router.config
+
+        for vm_name in sorted(snapshot.virtual_models):
+            entries = snapshot.virtual_models[vm_name]
+            virtual = cfg.virtual_models.get(vm_name)
+            if virtual is None:
+                continue
+            for entry in sorted(entries, key=lambda e: e["name"]):
+                if entry["status"] not in probe_statuses:
+                    continue
+                upstream_name = entry["name"]
+                upstream = next(
+                    (u for u in virtual.upstreams if u.name == upstream_name), None
+                )
+                if upstream is None:
+                    continue
+                await self._probe_upstream(upstream, virtual.name)
+
+    async def _probe_upstream(self, upstream: Upstream, vm_name: str) -> None:
+        """Send a minimal probe to one upstream and record the outcome."""
+        client = self._router._client_for(upstream)
+        probe_body = {
+            "model": upstream.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": self._config.probe_max_tokens,
+            "stream": False,
+        }
+        probe_timeout = httpx.Timeout(
+            connect=upstream.connect_timeout_seconds,
+            read=self._config.probe_timeout_seconds,
+            write=self._config.probe_timeout_seconds,
+            pool=self._config.probe_timeout_seconds,
+        )
+        try:
+            response = await client.post(
+                upstream.chat_completions_url,
+                json=probe_body,
+                headers=self._router._upstream_headers(upstream),
+                timeout=probe_timeout,
+            )
+        except httpx.TimeoutException:
+            if self._router.config.failover.retry_on_timeout:
+                self._router._record_retryable_failure(upstream)
+            if self._metrics:
+                self._metrics.record_attempt(
+                    vm_name, upstream.name, "timeout", error_type="TimeoutException"
+                )
+            logger.debug("health check probe timeout: %s", upstream.name)
+            return
+        except httpx.TransportError as exc:
+            if self._router.config.failover.retry_on_connection_error:
+                self._router._record_retryable_failure(upstream)
+            if self._metrics:
+                self._metrics.record_attempt(
+                    vm_name, upstream.name, "connection_error", error_type=type(exc).__name__
+                )
+            logger.debug("health check probe transport error: %s", upstream.name)
+            return
+
+        if 200 <= response.status_code < 300:
+            self._router._record_upstream_success(upstream)
+            if self._metrics:
+                self._metrics.record_attempt(
+                    vm_name, upstream.name, "success", status_code=response.status_code
+                )
+            logger.debug("health check probe recovered: %s", upstream.name)
+            return
+
+        _retryable_status = set(self._router.config.failover.retry_on_status)
+        if classify_status(response.status_code, _retryable_status) == "retryable":
+            self._router._record_retryable_failure(upstream)
+        else:
+            self._router._record_upstream_success(upstream)
+
+        is_json = "application/json" in response.headers.get("content-type", "")
+        error_message = response.text
+        if is_json:
+            with contextlib.suppress(Exception):
+                error_message = response.json().get("error", {}).get("message", response.text)
+
+        if self._metrics:
+            self._metrics.record_attempt(
+                vm_name,
+                upstream.name,
+                "http_error",
+                status_code=response.status_code,
+                error_message=error_message,
+            )
+        logger.debug(
+            "health check probe http error: %s status=%s", upstream.name, response.status_code
+        )

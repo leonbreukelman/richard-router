@@ -46,6 +46,10 @@ class UpstreamMetrics:
             self.success_count += 1
             self.consecutive_failures = 0
             self.last_ok = now
+            self.last_error = None
+            self.last_error_message = None
+            self.errors_by_code.clear()
+            self.errors_by_type.clear()
             self._window.append(True)
         else:
             self.error_count += 1
