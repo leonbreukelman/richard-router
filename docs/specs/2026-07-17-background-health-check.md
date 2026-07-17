@@ -2,7 +2,7 @@
 
 Date: 2026-07-17
 Track: F
-Status: authored
+Status: landed
 Thread: bg-health-check
 Supersedes: none
 Repo: leonbreukelman/richard-router (local: `/home/richard/richard-router`)
@@ -14,12 +14,16 @@ Driver: Hermes Agent · Certifier: self-certified (Claude Code Opus not availabl
 
 Done = a `github-pr` merged to `main` that adds a configurable background health-check task to the router which periodically probes degraded/down pool members, records the probe outcome through the existing metrics pipeline, and clears stale error state on success — verified by `uv run pytest -v` and `uv run ruff check .` both green on CI.
 
-Does NOT count as done:
-- shipping a spec without the implementation code;
-- a green local run without merged-PR evidence;
-- an external cron script instead of the in-process background task;
-- adding a probe mechanism without the error-clearing fix;
-- modifying the user-facing `richard-router status` table format.
+## Verification evidence (landed)
+
+- PR #23: https://github.com/leonbreukelman/richard-router/pull/23
+- Merge commit: `fe6467b0973f4ae8dc40bfd99e3b87b758d2e23a`
+- Merge method: squash
+- Branch: `feat/bg-health-check` → pushed → merged → deleted
+- CI check `uv / ruff / pytest`: success
+- Local gates: `uv run ruff check .` — clean; `uv run pytest -v` — 125 passed (106 existing + 19 new)
+- Changed files: 7 — `config/router.example.yaml`, `docs/specs/2026-07-17-background-health-check.md`, `richard_router/config.py`, `richard_router/main.py`, `richard_router/metrics.py`, `richard_router/service.py`, `tests/test_health_check.py`
+- Protected paths untouched: `config/router.yaml` not modified
 
 ## Goal
 
