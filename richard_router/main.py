@@ -13,7 +13,13 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from richard_router.config import RouterConfig, load_config, read_config_data, validate_config
 from richard_router.metrics import MetricsCollector
-from richard_router.service import ClientFactory, RichardRouter, RouterResult, RouterStream
+from richard_router.service import (
+    ClientFactory,
+    HealthCheckTask,
+    RichardRouter,
+    RouterResult,
+    RouterStream,
+)
 
 
 def _check_auth(request: Request, config: RouterConfig) -> None:
@@ -77,11 +83,18 @@ def create_app(
     )
     router = RichardRouter(cfg, client_factory=client_factory, metrics=metrics)
 
+    hc_task: HealthCheckTask | None = None
+    if cfg.health_check.enabled:
+        hc_task = HealthCheckTask(router, cfg.health_check, metrics)
+        hc_task.start()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            if hc_task is not None:
+                await hc_task.stop()
             await router.aclose()
 
     app = FastAPI(title="richard-router", version="0.1.0", lifespan=lifespan)
