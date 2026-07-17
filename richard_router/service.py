@@ -222,8 +222,10 @@ class RichardRouter:
         return response.headers.get("content-type", default).split(";")[0]
 
     def _retryable_status(self, status_code: int) -> bool:
-        retryable_status = set(self.config.failover.retry_on_status)
-        return classify_status(status_code, retryable_status) == "retryable"
+        configured = self.config.failover.retry_on_status
+        if configured is None:
+            return classify_status(status_code) == "retryable"
+        return classify_status(status_code, set(configured)) == "retryable"
 
     @staticmethod
     def _retryable_exception(exc: Exception) -> bool:
@@ -869,8 +871,12 @@ class HealthCheckTask:
             logger.debug("health check probe recovered: %s", upstream.name)
             return
 
-        _retryable_status = set(self._router.config.failover.retry_on_status)
-        if classify_status(response.status_code, _retryable_status) == "retryable":
+        _cfg_status = self._router.config.failover.retry_on_status
+        if _cfg_status is None:
+            _is_retryable = classify_status(response.status_code) == "retryable"
+        else:
+            _is_retryable = classify_status(response.status_code, set(_cfg_status)) == "retryable"
+        if _is_retryable:
             self._router._record_retryable_failure(upstream)
         else:
             self._router._record_upstream_success(upstream)

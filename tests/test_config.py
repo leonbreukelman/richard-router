@@ -123,6 +123,31 @@ def test_example_file_provider_form_parses_and_documents_inline_backcompat():
     assert "Legacy inline form remains supported" in text
 
 
+def test_omitted_retry_on_status_uses_default_policy(tmp_path):
+    raw = _provider_reference_config()
+    # no failover block → omitted retry_on_status
+    cfg = load_config(_write_yaml(tmp_path, "omit_retry.yaml", raw), env={"TEST_PROVIDER_API_KEY": "x"})
+    assert cfg.failover.retry_on_status is None
+
+
+def test_explicit_empty_retry_on_status_is_authoritative(tmp_path):
+    raw = _provider_reference_config()
+    raw["failover"] = {"retry_on_status": []}
+    cfg = load_config(
+        _write_yaml(tmp_path, "empty_retry.yaml", raw), env={"TEST_PROVIDER_API_KEY": "x"}
+    )
+    assert cfg.failover.retry_on_status == ()
+
+
+def test_explicit_retry_on_status_list_preserved(tmp_path):
+    raw = _provider_reference_config()
+    raw["failover"] = {"retry_on_status": [429]}
+    cfg = load_config(
+        _write_yaml(tmp_path, "only_429.yaml", raw), env={"TEST_PROVIDER_API_KEY": "x"}
+    )
+    assert cfg.failover.retry_on_status == (429,)
+
+
 def test_legacy_inline_fixture_still_parses(tmp_path):
     raw = copy.deepcopy(_legacy_inline_config())
     cfg = load_config(

@@ -55,7 +55,9 @@ class CircuitBreakerConfig:
 
 @dataclass(frozen=True)
 class FailoverConfig:
-    retry_on_status: tuple[int, ...] = DEFAULT_RETRY_STATUS
+    # None = omitted policy → classify_status defaults (DEFAULT list + blanket 5xx).
+    # Explicit tuple (including empty) is authoritative for status retries.
+    retry_on_status: tuple[int, ...] | None = None
     retry_on_timeout: bool = True
     retry_on_connection_error: bool = True
     max_attempts_per_upstream: int = 1
@@ -143,7 +145,9 @@ class CircuitBreakerConfigModel(BaseModel):
 class FailoverConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    retry_on_status: list[int] = Field(default_factory=lambda: list(DEFAULT_RETRY_STATUS))
+    # None = field omitted → use DEFAULT_RETRY_STATUS (+ default 5xx blanket in classify).
+    # Explicit list (including []) is authoritative for status retries.
+    retry_on_status: list[int] | None = None
     retry_on_timeout: bool = True
     retry_on_connection_error: bool = True
     max_attempts_per_upstream: int = 1
@@ -438,7 +442,11 @@ def _normalize_upstream(
 
 
 def _build_router_config(model: RouterConfigModel) -> RouterConfig:
-    retry_status = model.failover.retry_on_status or list(DEFAULT_RETRY_STATUS)
+    # Distinguish omitted (None) from explicit empty list [].
+    if model.failover.retry_on_status is None:
+        retry_status: tuple[int, ...] | None = None
+    else:
+        retry_status = tuple(int(x) for x in model.failover.retry_on_status)
     circuit_breaker = CircuitBreakerConfig(
         enabled=bool(model.failover.circuit_breaker.enabled),
         failure_threshold=max(1, int(model.failover.circuit_breaker.failure_threshold)),
@@ -446,7 +454,7 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
         half_open_max_probes=max(1, int(model.failover.circuit_breaker.half_open_max_probes)),
     )
     failover = FailoverConfig(
-        retry_on_status=tuple(int(x) for x in retry_status),
+        retry_on_status=retry_status,
         retry_on_timeout=bool(model.failover.retry_on_timeout),
         retry_on_connection_error=bool(model.failover.retry_on_connection_error),
         max_attempts_per_upstream=max(1, int(model.failover.max_attempts_per_upstream)),
