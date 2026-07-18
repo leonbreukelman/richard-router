@@ -86,9 +86,9 @@ with the general HTTP retry classification (see PR #34 /
   `_record_http_failure` and `HealthCheckTask._probe_upstream`.
 - Regression tests: `tests/test_circuit_breaker.py` (updated
   `test_half_open_non_retryable_response_keeps_breaker_open`, new
-  `test_mixed_503_then_400_probe_keeps_breaker_open`) and
-  `tests/test_health_check_task.py`
-  (`test_health_check_400_against_open_breaker_keeps_it_open`).
+  `test_mixed_503_then_400_probe_keeps_breaker_open_then_recovers_on_2xx`)
+  and `tests/test_health_check.py`
+  (`test_probe_400_against_open_breaker_keeps_it_open`).
 - README: `README.md` circuit-breaker section updated to state
   "A successful 2xx probe closes the circuit."
 - Gates: `uv run ruff check .`, `uv run pytest -v`.
