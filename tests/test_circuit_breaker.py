@@ -28,10 +28,12 @@ def _config_with_breaker(
     failure_threshold: int = 2,
     cooldown_seconds: float = 30.0,
     half_open_max_probes: int = 1,
+    retry_on_status: tuple[int, ...] | None = None,
 ):
     return replace(
         make_test_config(),
         failover=FailoverConfig(
+            retry_on_status=retry_on_status,
             circuit_breaker=CircuitBreakerConfig(
                 enabled=enabled,
                 failure_threshold=failure_threshold,
@@ -307,3 +309,64 @@ async def test_streaming_uses_open_circuit_breaker():
         "openrouter-real-model",
         "openrouter-real-model",
     ]
+
+
+@pytest.mark.asyncio
+async def test_breaker_opens_on_429_when_policy_lists_429_only():
+    """failure_threshold=1 + [429]: primary 429 opens breaker; next request skips primary."""
+    clock = ManualClock()
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        if model == "nvidia-real-model":
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return _json_success(model)
+
+    router = RichardRouter(
+        _config_with_breaker(
+            failure_threshold=1,
+            cooldown_seconds=30.0,
+            retry_on_status=(429,),
+        ),
+        _client_factory(handler),
+        clock=clock,
+    )
+
+    first = await router.chat_completion({"model": "coding", "messages": []})
+    second = await router.chat_completion({"model": "coding", "messages": []})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    # First: nvidia 429 → openrouter; second: nvidia skipped (open) → openrouter only
+    assert calls == [
+        "nvidia-real-model",
+        "openrouter-real-model",
+        "openrouter-real-model",
+    ]
+    assert second.headers["x-richard-router-upstream"] == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_breaker_does_not_open_on_503_when_policy_empty():
+    """failure_threshold=1 + []: 503 is non-retryable; breaker stays closed."""
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        return httpx.Response(503, json={"error": {"message": "overloaded"}})
+
+    router = RichardRouter(
+        _config_with_breaker(failure_threshold=1, retry_on_status=()),
+        _client_factory(handler),
+    )
+
+    first = await router.chat_completion({"model": "coding", "messages": []})
+    second = await router.chat_completion({"model": "coding", "messages": []})
+
+    assert first.status_code == 503
+    assert second.status_code == 503
+    # Both hit primary only — no failover, no open-circuit skip of primary
+    assert calls == ["nvidia-real-model", "nvidia-real-model"]

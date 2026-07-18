@@ -9,7 +9,10 @@ from typing import Any, cast
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-DEFAULT_RETRY_STATUS = (408, 409, 429, 500, 502, 503, 504)
+from richard_router.errors import RETRYABLE_STATUS
+
+# Single source of truth lives in errors.RETRYABLE_STATUS (omitted-policy defaults).
+DEFAULT_RETRY_STATUS = tuple(sorted(RETRYABLE_STATUS))
 DEFAULT_READ_TIMEOUT_SECONDS = 60.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
 
@@ -145,8 +148,9 @@ class CircuitBreakerConfigModel(BaseModel):
 class FailoverConfigModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    # None = field omitted → use DEFAULT_RETRY_STATUS (+ default 5xx blanket in classify).
-    # Explicit list (including []) is authoritative for status retries.
+    # None / omitted → default policy (RETRYABLE_STATUS + blanket 5xx in classify).
+    # Explicit list → only those statuses retryable (no blanket 5xx).
+    # Explicit [] → no HTTP statuses are retryable.
     retry_on_status: list[int] | None = None
     retry_on_timeout: bool = True
     retry_on_connection_error: bool = True

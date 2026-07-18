@@ -871,12 +871,7 @@ class HealthCheckTask:
             logger.debug("health check probe recovered: %s", upstream.name)
             return
 
-        _cfg_status = self._router.config.failover.retry_on_status
-        if _cfg_status is None:
-            _is_retryable = classify_status(response.status_code) == "retryable"
-        else:
-            _is_retryable = classify_status(response.status_code, set(_cfg_status)) == "retryable"
-        if _is_retryable:
+        if self._router._retryable_status(response.status_code):
             self._router._record_retryable_failure(upstream)
         else:
             self._router._record_upstream_success(upstream)

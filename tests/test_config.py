@@ -126,7 +126,10 @@ def test_example_file_provider_form_parses_and_documents_inline_backcompat():
 def test_omitted_retry_on_status_uses_default_policy(tmp_path):
     raw = _provider_reference_config()
     # no failover block → omitted retry_on_status
-    cfg = load_config(_write_yaml(tmp_path, "omit_retry.yaml", raw), env={"TEST_PROVIDER_API_KEY": "x"})
+    cfg = load_config(
+        _write_yaml(tmp_path, "omit_retry.yaml", raw),
+        env={"TEST_PROVIDER_API_KEY": "x"},
+    )
     assert cfg.failover.retry_on_status is None
 
 
