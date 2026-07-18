@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from richard_router.config import FailoverConfig
-from richard_router.service import RichardRouter
+from richard_router.service import RichardRouter, RouterStream
 from tests.conftest import make_test_config
 
 
@@ -113,6 +113,90 @@ async def test_retryable_primary_status_fails_over_to_openrouter(monkeypatch):
     assert result.headers["x-richard-router-upstream"] == "openrouter"
     assert called_models == ["nvidia-real-model", "openrouter-real-model"]
     assert payload["model"] == "coding"
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type"),
+    [
+        (b"<html>overloaded</html>", "text/html"),
+        (b'{"error":', "application/json"),
+        (b'["overloaded"]', "application/json"),
+    ],
+    ids=["html", "malformed-json", "non-object-json"],
+)
+@pytest.mark.asyncio
+async def test_retryable_non_json_primary_error_preserves_failover(content, content_type):
+    called_models = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        called_models.append(model)
+        if model == "nvidia-real-model":
+            return httpx.Response(503, content=content, headers={"content-type": content_type})
+        return _ok_json(model)
+
+    router = RichardRouter(make_test_config(), _client_factory(handler))
+    result = await router.chat_completion({"model": "coding", "messages": []})
+
+    assert result.status_code == 200
+    assert result.headers["x-richard-router-upstream"] == "openrouter"
+    assert called_models == ["nvidia-real-model", "openrouter-real-model"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_non_json_primary_error_preserves_failover():
+    called_models = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        called_models.append(model)
+        if model == "nvidia-real-model":
+            return httpx.Response(
+                503,
+                content=b"<html>overloaded</html>",
+                headers={"content-type": "text/html"},
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"id":"chunk","model":"openrouter-real-model",'
+                b'"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    router = RichardRouter(make_test_config(), _client_factory(handler))
+    result = await router.open_stream({"model": "coding", "messages": [], "stream": True})
+    assert isinstance(result, RouterStream)
+    payload = b"".join([chunk async for chunk in result.iterator])
+
+    assert b'"model":"coding"' in payload
+    assert result.headers["x-richard-router-upstream"] == "openrouter"
+    assert called_models == ["nvidia-real-model", "openrouter-real-model"]
+
+
+@pytest.mark.asyncio
+async def test_all_non_json_upstream_failures_return_attempt_evidence():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            content=b"temporarily unavailable",
+            headers={"content-type": "text/plain"},
+        )
+
+    router = RichardRouter(make_test_config(), _client_factory(handler))
+    result = await router.chat_completion({"model": "coding", "messages": []})
+    payload = json.loads(result.content)
+
+    assert result.status_code == 503
+    assert [attempt["upstream"] for attempt in payload["error"]["attempts"]] == [
+        "nvidia",
+        "openrouter",
+    ]
+    assert all(
+        attempt["outcome"] == "http_error" for attempt in payload["error"]["attempts"]
+    )
 
 
 @pytest.mark.asyncio
