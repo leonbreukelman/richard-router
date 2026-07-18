@@ -232,6 +232,63 @@ async def test_streaming_rewrites_model_to_virtual_name():
 
 
 @pytest.mark.asyncio
+async def test_timeout_policy_disabled_reports_truthful_single_failure():
+    """retry_on_timeout=false: primary times out → 503 names the upstream
+    and the policy, does NOT claim all upstreams failed."""
+    import dataclasses
+
+    config = make_test_config()
+    config = dataclasses.replace(
+        config, failover=dataclasses.replace(config.failover, retry_on_timeout=False)
+    )
+    call_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ReadTimeout("slow primary")
+
+    router = RichardRouter(config, _client_factory(handler))
+    result = await router.chat_completion({"model": "coding", "messages": []})
+    payload = json.loads(result.content)
+    assert result.status_code == 503
+    assert "all upstreams failed" not in payload["error"]["message"]
+    assert "nvidia" in payload["error"]["message"]
+    assert "timeout_failover_disabled" in payload["error"]["message"]
+    assert call_count == 1
+    assert [attempt["upstream"] for attempt in payload["error"]["attempts"]] == ["nvidia"]
+
+
+@pytest.mark.asyncio
+async def test_connection_error_policy_disabled_reports_truthful_single_failure():
+    """retry_on_connection_error=false: primary connection fails → 503 names
+    the upstream and the policy, does NOT claim all upstreams failed."""
+    import dataclasses
+
+    config = make_test_config()
+    config = dataclasses.replace(
+        config,
+        failover=dataclasses.replace(config.failover, retry_on_connection_error=False),
+    )
+    call_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ConnectError("connect failed to primary")
+
+    router = RichardRouter(config, _client_factory(handler))
+    result = await router.chat_completion({"model": "coding", "messages": []})
+    payload = json.loads(result.content)
+    assert result.status_code == 503
+    assert "all upstreams failed" not in payload["error"]["message"]
+    assert "nvidia" in payload["error"]["message"]
+    assert "connection_failover_disabled" in payload["error"]["message"]
+    assert call_count == 1
+    assert [attempt["upstream"] for attempt in payload["error"]["attempts"]] == ["nvidia"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_virtual_model_returns_404():
     router = RichardRouter(make_test_config(), _client_factory(lambda request: httpx.Response(500)))
     result = await router.chat_completion({"model": "missing", "messages": []})

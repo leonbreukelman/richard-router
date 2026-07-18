@@ -290,3 +290,92 @@ async def test_streaming_decision_log_is_metadata_only():
     serialized = _serialized(records)
     assert "stream user secret" not in serialized
     assert "stream assistant secret" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_decision_log_timeout_policy_disabled_outcome():
+    """retry_on_timeout=false: decision log records
+    timeout_failover_disabled, not all_failed, with only the primary in attempts."""
+    import dataclasses
+
+    records: list[dict[str, Any]] = []
+    config = make_test_config()
+    config = dataclasses.replace(
+        config, failover=dataclasses.replace(config.failover, retry_on_timeout=False)
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow primary")
+
+    router = RichardRouter(
+        config,
+        _client_factory(handler),
+        decision_logger=records.append,
+    )
+    result = await router.chat_completion({"model": "coding", "messages": []})
+    assert result.status_code == 503
+    assert records == [
+        {
+            "event": "chat_completion.route",
+            "stream": False,
+            "virtual_model": "coding",
+            "outcome": "timeout_failover_disabled",
+            "selected_upstream": None,
+            "status_code": 503,
+            "attempts": [
+                {
+                    "upstream": "nvidia",
+                    "outcome": "timeout",
+                    "status_code": None,
+                    "error_type": "TimeoutException",
+                }
+            ],
+        }
+    ]
+    serialized = _serialized(records)
+    assert "all_failed" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_decision_log_connection_error_policy_disabled_outcome():
+    """retry_on_connection_error=false: decision log records
+    connection_failover_disabled, not all_failed, with only the primary in attempts."""
+    import dataclasses
+
+    records: list[dict[str, Any]] = []
+    config = make_test_config()
+    config = dataclasses.replace(
+        config,
+        failover=dataclasses.replace(config.failover, retry_on_connection_error=False),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connect failed to primary")
+
+    router = RichardRouter(
+        config,
+        _client_factory(handler),
+        decision_logger=records.append,
+    )
+    result = await router.chat_completion({"model": "coding", "messages": []})
+    assert result.status_code == 503
+    assert records == [
+        {
+            "event": "chat_completion.route",
+            "stream": False,
+            "virtual_model": "coding",
+            "outcome": "connection_failover_disabled",
+            "selected_upstream": None,
+            "status_code": 503,
+            "attempts": [
+                {
+                    "upstream": "nvidia",
+                    "outcome": "connection_error",
+                    "status_code": None,
+                    "error_type": "ConnectError",
+                }
+            ],
+        }
+    ]
+    serialized = _serialized(records)
+    assert "all_failed" not in serialized

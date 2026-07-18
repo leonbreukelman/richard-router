@@ -272,6 +272,31 @@ class RichardRouter:
     # Shared failover helpers — extracted from chat_completion / open_stream
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_error_message(response: httpx.Response) -> str:
+        """Extract a human-readable error message from an upstream error response.
+
+        Tries (in order):
+        1. OpenAI format: ``{"error": {"message": "..."}}``
+        2. Problem Details (RFC 9457): ``{"detail": "..."}`` or ``{"title": "..."}``
+        3. Raw response text (always available as fallback)
+        """
+        is_json = "application/json" in response.headers.get("content-type", "")
+        if not is_json:
+            return response.text
+        with contextlib.suppress(Exception):
+            body = response.json()
+            # OpenAI: {"error": {"message": "..."}}
+            error_obj = body.get("error")
+            if isinstance(error_obj, dict) and error_obj.get("message"):
+                return error_obj["message"]
+            # Problem Details (RFC 9457): {"detail": "...", "title": "..."}
+            if body.get("detail"):
+                return body["detail"]
+            if body.get("title"):
+                return body["title"]
+        return response.text
+
     def _record_success(
         self,
         upstream: Upstream,
@@ -366,6 +391,45 @@ class RichardRouter:
             Attempt(upstream.name, "error", error_type=type(exc).__name__)
         )
         return False
+
+    def _policy_disabled_failed(
+        self,
+        attempts: list[Attempt],
+        virtual_model: str,
+        *,
+        stream: bool,
+        reason: str,
+    ) -> RouterResult:
+        """Terminal result when a transport failure occurred but failover was
+        disabled by policy (``retry_on_timeout=false`` or
+        ``retry_on_connection_error=false``).
+
+        Unlike ``_all_failed``, this truthfully reports that only the upstreams
+        actually tried have failed and that fallback was prevented by policy —
+        not that every upstream was exhausted.
+        """
+        self._emit_route_decision(
+            virtual_model=virtual_model,
+            stream=stream,
+            outcome=reason,
+            selected_upstream=None,
+            status_code=503,
+            attempts=attempts,
+        )
+        last = attempts[-1] if attempts else None
+        upstream_name = last.upstream if last else "unknown"
+        outcome = last.outcome if last else "error"
+        return RouterResult(
+            status_code=503,
+            content=json.dumps(
+                {
+                    "error": {
+                        "message": f"upstream {upstream_name} failed ({outcome}); {reason}",
+                        "attempts": [attempt.safe_dict() for attempt in attempts],
+                    }
+                }
+            ).encode("utf-8"),
+        )
 
     def _all_failed(
         self, attempts: list[Attempt], virtual_model: str, *, stream: bool
@@ -508,6 +572,13 @@ class RichardRouter:
                     upstream, exc, attempts, virtual_model_name=virtual.name
                 )
                 if not should_continue:
+                    if not self.config.failover.retry_on_timeout:
+                        return self._policy_disabled_failed(
+                            attempts,
+                            virtual.name,
+                            stream=stream,
+                            reason="timeout_failover_disabled",
+                        )
                     return self._all_failed(attempts, virtual.name, stream=stream)
                 continue
             except httpx.TransportError as exc:
@@ -515,6 +586,13 @@ class RichardRouter:
                     upstream, exc, attempts, virtual_model_name=virtual.name
                 )
                 if not should_continue:
+                    if not self.config.failover.retry_on_connection_error:
+                        return self._policy_disabled_failed(
+                            attempts,
+                            virtual.name,
+                            stream=stream,
+                            reason="connection_failover_disabled",
+                        )
                     return self._all_failed(attempts, virtual.name, stream=stream)
                 continue
 
@@ -573,11 +651,7 @@ class RichardRouter:
                 )
 
             # HTTP error — extract error message then record
-            is_json = "application/json" in response.headers.get("content-type", "")
-            error_data = response.json().get("error", {})
-            error_message = error_data.get("message", response.text)
-            if not is_json:
-                error_message = response.text
+            error_message = self._extract_error_message(response)
 
             should_continue = self._record_http_failure(
                 upstream,
@@ -663,6 +737,7 @@ class RichardRouter:
                     response,
                     attempts,
                     virtual_model_name=virtual.name,
+                    error_message=self._extract_error_message(response),
                 )
                 if not should_continue:
                     self._emit_route_decision(
@@ -875,11 +950,7 @@ class HealthCheckTask:
         else:
             self._router._record_upstream_success(upstream)
 
-        is_json = "application/json" in response.headers.get("content-type", "")
-        error_message = response.text
-        if is_json:
-            with contextlib.suppress(Exception):
-                error_message = response.json().get("error", {}).get("message", response.text)
+        error_message = self._router._extract_error_message(response)
 
         if self._metrics:
             self._metrics.record_attempt(
