@@ -20,6 +20,12 @@ providers:
       X-Title: richard-router
 
 failover:
+  # retry_on_status policy (three states):
+  # - omit the field entirely → default list + blanket 5xx (e.g. 599 still retryable)
+  # - explicit list → ONLY listed statuses are retryable (no blanket 5xx inheritance)
+  # - explicit [] → no HTTP statuses are retryable
+  # NOTE: listing statuses here means strict-list semantics. Example copies get that
+  # behavior; omit the key if you want the historical default+blanket-5xx policy.
   retry_on_status: [408, 409, 429, 500, 502, 503, 504]
   retry_on_timeout: true
   retry_on_connection_error: true

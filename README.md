@@ -81,11 +81,23 @@ hermes -p routertest chat -Q -q 'Reply exactly: ROUTER-OK'
 
 ## Failover policy
 
-By default the router retries the next upstream on:
+Transport retries (when enabled):
 
 - timeout
 - connection error
-- HTTP 408, 409, 429, 500, 502, 503, 504
+
+### `failover.retry_on_status` — three states
+
+| Config | Meaning |
+|--------|---------|
+| **Field omitted** | Default status set (408, 409, 429, 500, 502, 503, 504) **plus** blanket 5xx (e.g. 599 still fails over). |
+| **Explicit list** | **Only** listed statuses are retryable. No blanket 5xx inheritance. |
+| **Explicit `[]`** | No HTTP statuses are retryable (timeouts/connection errors still follow their flags). |
+
+**Compatibility note:** Existing configs that set an explicit list no longer treat
+unlisted 5xx (505, 599, …) as retryable. To keep historical “any 5xx fails over”
+behavior, **omit** `retry_on_status` entirely. Copying `config/router.example.yaml`
+as-is uses the explicit list (strict-list semantics).
 
 It does not fail over on normal caller/configuration errors like:
 
