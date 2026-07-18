@@ -111,8 +111,12 @@ fallback.
 
 The circuit breaker is enabled by default. Retryable upstream failures open a
 provider/model circuit after five consecutive failures, skip it for 30 seconds,
-then allow one half-open probe. A successful probe closes the circuit again.
-Caller/configuration errors such as 400/401/403/422 do not open the breaker.
+then allow one half-open probe. Only a successful 2xx probe closes the
+circuit; a non-2xx probe (retryable failure or non-retryable 4xx) leaves the
+breaker open and re-arms the cooldown, so the next request continues to skip
+the primary. Caller/configuration errors such as 400/401/403/422 do not open
+the breaker while it is closed. See
+`docs/decisions/2026-07-18-half-open-requires-2xx.md`.
 
 ## Load balancing
 

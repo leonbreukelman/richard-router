@@ -161,6 +161,30 @@ class RichardRouter:
             state.opened_at = self.clock()
             state.half_open_probes = 0
 
+    def _record_non_retryable_response(self, upstream: Upstream) -> None:
+        """Record a non-retryable non-2xx response (e.g. 400/401/403/422).
+
+        A 4xx proves the upstream answered, not that a prior 5xx condition
+        recovered.  Policy (see ``docs/decisions/2026-07-18-half-open-requires-2xx.md``):
+
+        - Closed state: clear stale consecutive-failure counts, but do not
+          open the breaker.  A caller error should not consume a slot toward
+          the failure threshold.
+        - Open state (including half-open probe in flight): leave the
+          breaker open.  Re-arm ``opened_at`` to now and reset the
+          half-open probe counter so the next request after cooldown is
+          again a single probe.  ``consecutive_failures`` is not
+          incremented because the response was not a retryable failure.
+        """
+        if not self.config.failover.circuit_breaker.enabled:
+            return
+        state = self._circuit_breaker_state(upstream)
+        if state.opened_at is not None:
+            state.opened_at = self.clock()
+            state.half_open_probes = 0
+            return
+        state.consecutive_failures = 0
+
     async def aclose(self) -> None:
         clients = list(self._clients.values())
         self._clients.clear()
@@ -341,7 +365,7 @@ class RichardRouter:
         if self._retryable_status(response.status_code):
             self._record_retryable_failure(upstream)
             return True
-        self._record_upstream_success(upstream)
+        self._record_non_retryable_response(upstream)
         return False
 
     def _record_transport_failure(
@@ -949,7 +973,7 @@ class HealthCheckTask:
         if self._router._retryable_status(response.status_code):
             self._router._record_retryable_failure(upstream)
         else:
-            self._router._record_upstream_success(upstream)
+            self._router._record_non_retryable_response(upstream)
 
         error_message = self._router._extract_error_message(response)
 

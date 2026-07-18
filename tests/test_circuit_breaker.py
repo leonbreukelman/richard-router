@@ -207,9 +207,16 @@ async def test_non_retryable_response_resets_consecutive_failures():
 
 
 @pytest.mark.asyncio
-async def test_half_open_non_retryable_response_closes_breaker():
+async def test_half_open_non_retryable_response_keeps_breaker_open():
+    """Policy: a non-retryable 4xx probe does not close a half-open breaker.
+
+    A 4xx proves the upstream answered but not that the prior 5xx condition
+    recovered.  The breaker must remain open (cooldown re-armed) so the next
+    request continues to skip the primary until a genuine 2xx probe succeeds.
+    See docs/decisions/2026-07-18-half-open-requires-2xx.md.
+    """
     clock = ManualClock()
-    primary_statuses = [503, 400, 400]
+    primary_statuses = [503, 400]
     calls: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -230,19 +237,75 @@ async def test_half_open_non_retryable_response_closes_breaker():
     skipped = await router.chat_completion({"model": "coding", "messages": []})
     clock.advance(31.0)
     probe = await router.chat_completion({"model": "coding", "messages": []})
-    closed_again = await router.chat_completion({"model": "coding", "messages": []})
+    # Cooldown has been re-armed by the 400 probe; primary must still be skipped.
+    still_open = await router.chat_completion({"model": "coding", "messages": []})
 
     assert opened.headers["x-richard-router-upstream"] == "openrouter"
     assert skipped.headers["x-richard-router-upstream"] == "openrouter"
+    # The half-open probe returned 400 to the caller (non-retryable is terminal).
     assert probe.status_code == 400
-    assert closed_again.status_code == 400
+    # Next request must not hit the primary — breaker is still open.
+    assert still_open.headers["x-richard-router-upstream"] == "openrouter"
     assert calls == [
         "nvidia-real-model",
         "openrouter-real-model",
         "openrouter-real-model",
         "nvidia-real-model",
-        "nvidia-real-model",
+        "openrouter-real-model",
     ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_503_then_400_probe_keeps_breaker_open_then_recovers_on_2xx():
+    """Regression: 503×threshold → cooldown → 400 probe → cooldown → 2xx probe closes.
+
+    The 400 probe must not close the breaker; a subsequent successful probe
+    after the second cooldown is what closes it.
+    """
+    clock = ManualClock()
+    # threshold=2: two 503s open breaker, then 400 as probe, then 200 as probe,
+    # then a follow-up 200 after the breaker has closed.
+    primary_statuses = [503, 503, 400, 200, 200]
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        if model == "nvidia-real-model":
+            status = primary_statuses.pop(0)
+            if status == 200:
+                return _json_success(model)
+            return httpx.Response(status, json={"error": {"message": "primary response"}})
+        return _json_success(model)
+
+    router = RichardRouter(
+        _config_with_breaker(failure_threshold=2, cooldown_seconds=30.0),
+        _client_factory(handler),
+        clock=clock,
+    )
+
+    # Two retryable failures open the breaker.
+    first = await router.chat_completion({"model": "coding", "messages": []})
+    second = await router.chat_completion({"model": "coding", "messages": []})
+    # Breaker is open; next request skips primary.
+    skipped = await router.chat_completion({"model": "coding", "messages": []})
+    # Advance past cooldown; next request is a half-open probe that gets 400.
+    clock.advance(31.0)
+    bad_probe = await router.chat_completion({"model": "coding", "messages": []})
+    # Breaker must still be open (cooldown re-armed).
+    still_skipped = await router.chat_completion({"model": "coding", "messages": []})
+    # Advance again; next probe returns 200 and closes the breaker.
+    clock.advance(31.0)
+    good_probe = await router.chat_completion({"model": "coding", "messages": []})
+    closed_again = await router.chat_completion({"model": "coding", "messages": []})
+
+    assert first.headers["x-richard-router-upstream"] == "openrouter"
+    assert second.headers["x-richard-router-upstream"] == "openrouter"
+    assert skipped.headers["x-richard-router-upstream"] == "openrouter"
+    assert bad_probe.status_code == 400
+    assert still_skipped.headers["x-richard-router-upstream"] == "openrouter"
+    assert good_probe.headers["x-richard-router-upstream"] == "nvidia"
+    assert closed_again.headers["x-richard-router-upstream"] == "nvidia"
 
 
 @pytest.mark.asyncio
