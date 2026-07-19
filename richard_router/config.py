@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from richard_router.errors import RETRYABLE_STATUS
+
+logger = logging.getLogger(__name__)
 
 # Single source of truth lives in errors.RETRYABLE_STATUS (omitted-policy defaults).
 DEFAULT_RETRY_STATUS = tuple(sorted(RETRYABLE_STATUS))
@@ -363,16 +366,25 @@ def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> l
 
 
 def _resolve_config_path(path: str | Path | None = None) -> Path:
-    config_path = Path(
-        path
-        or os.getenv("ROUTER_CONFIG")
-        or os.getenv("RICHARD_ROUTER_CONFIG")
-        or "config/router.yaml"
-    )
-    if not config_path.exists() and str(config_path) == "config/router.yaml":
+    explicit_path = path
+    if explicit_path is None:
+        explicit_path = os.getenv("ROUTER_CONFIG") or os.getenv("RICHARD_ROUTER_CONFIG")
+
+    config_path = Path(explicit_path or "config/router.yaml")
+    if explicit_path is None and not config_path.exists():
         example = Path("config/router.example.yaml")
         if example.exists():
             config_path = example
+
+            logger.warning(
+                "ROUTER CONFIG FALLBACK: default config/router.yaml is missing; using %s",
+                config_path,
+            )
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"router config file not found: {config_path}")
+
+    logger.info("Active router config: %s", config_path)
     return config_path
 
 
