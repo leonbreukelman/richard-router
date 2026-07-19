@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from richard_router.config import (
     FailoverConfig,
@@ -13,6 +14,7 @@ from richard_router.config import (
     Upstream,
     VirtualModel,
 )
+from richard_router.main import create_app
 from richard_router.metrics import MetricsCollector, UpstreamMetrics
 from richard_router.service import HealthCheckTask, RichardRouter
 
@@ -423,6 +425,31 @@ class TestHealthCheckTaskTick:
 
 
 class TestHealthCheckLifecycle:
+    def test_enabled_app_can_be_constructed_without_running_event_loop(self):
+        """App construction defers starting the task until ASGI lifespan startup."""
+        app = create_app(_make_config(health_enabled=True))
+
+        task = app.state.health_check_task
+        assert isinstance(task, HealthCheckTask)
+        assert task._task is None
+
+    def test_app_lifespan_starts_and_stops_enabled_task(self):
+        app = create_app(_make_config(health_enabled=True))
+        task = app.state.health_check_task
+
+        with TestClient(app):
+            assert task._task is not None
+            assert not task._task.done()
+
+        assert task._task is None
+
+    def test_disabled_app_creates_no_health_check_task(self):
+        app = create_app(_make_config(health_enabled=False))
+
+        assert app.state.health_check_task is None
+        with TestClient(app):
+            assert app.state.health_check_task is None
+
     @pytest.mark.asyncio
     async def test_task_starts_when_enabled(self):
         """Start creates an asyncio task."""
