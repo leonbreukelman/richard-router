@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 from fastapi.testclient import TestClient
 
 from richard_router.config import (
@@ -114,6 +115,73 @@ class TestPoolEndpoint:
         assert resp.status_code == 401
 
         del os.environ["TEST_POOL_AUTH_KEY"]
+
+    def test_upstream_error_secrets_are_redacted_from_pool_and_status_cli(
+        self, capsys, monkeypatch
+    ):
+        import argparse
+        import urllib.request
+
+        from richard_router.main import _status_cli
+
+        secrets = {
+            "api_key": "sk-" + "a" * 20,
+            "authorization": "Bearer " + "b" * 20,
+            "cookie": "nvapi-" + "c" * 20,
+            "client_secret": "sk-" + "d" * 20,
+        }
+        error_message = "provider rejected credentials; " + "; ".join(
+            f"{key}={value}" for key, value in secrets.items()
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": {"message": error_message}})
+
+        transport = httpx.MockTransport(handler)
+
+        def client_factory(_upstream):
+            return httpx.AsyncClient(transport=transport)
+
+        app = create_app(_make_config(), client_factory=client_factory)
+        with TestClient(app) as client:
+            chat_response = client.post(
+                "/v1/chat/completions", json={"model": "coding", "messages": []}
+            )
+            assert chat_response.status_code == 401
+
+            pool_response = client.get("/v1/pool")
+
+        assert pool_response.status_code == 200
+        pool_payload = pool_response.json()
+        stored_message = pool_payload["virtual_models"]["coding"][0]["last_error_message"]
+        assert "provider rejected credentials" in stored_message
+        assert "[REDACTED]" in stored_message
+        serialized_pool = json.dumps(pool_payload)
+        assert all(secret not in serialized_pool for secret in secrets.values())
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return json.dumps(pool_payload).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+        args = argparse.Namespace(
+            url="http://router.test",
+            vm=None,
+            json=True,
+            api_key_env="",
+            timeout=2,
+        )
+
+        assert _status_cli(args) == 0
+        status_output = capsys.readouterr().out
+        assert "provider rejected credentials" in status_output
+        assert all(secret not in status_output for secret in secrets.values())
 
 
 class TestStatusCLI:

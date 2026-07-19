@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
+from richard_router.redaction import redact_text
+
 Status = str  # "healthy" | "degraded" | "down"
 
 
@@ -55,7 +57,9 @@ class UpstreamMetrics:
             self.error_count += 1
             self.consecutive_failures += 1
             self.last_error = now
-            self.last_error_message = error_message
+            self.last_error_message = (
+                redact_text(error_message) if error_message is not None else None
+            )
             if status_code is not None:
                 self.errors_by_code[status_code] = self.errors_by_code.get(status_code, 0) + 1
             if error_type:
