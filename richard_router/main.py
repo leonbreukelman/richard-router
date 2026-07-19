@@ -22,6 +22,15 @@ from richard_router.service import (
 )
 
 
+def _constant_time_ascii_equal(value: str, expected: str) -> bool:
+    try:
+        value_bytes = value.encode("ascii")
+        expected_bytes = expected.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(value_bytes, expected_bytes)
+
+
 def _check_auth(request: Request, config: RouterConfig) -> None:
     expected = config.inbound_api_key
     if not expected:
@@ -29,7 +38,9 @@ def _check_auth(request: Request, config: RouterConfig) -> None:
     auth = request.headers.get("authorization", "")
     x_api_key = request.headers.get("x-api-key", "")
     expected_bearer = f"Bearer {expected}"
-    if hmac.compare_digest(auth, expected_bearer) or hmac.compare_digest(x_api_key, expected):
+    if _constant_time_ascii_equal(auth, expected_bearer) or _constant_time_ascii_equal(
+        x_api_key, expected
+    ):
         return
     raise HTTPException(status_code=401, detail="unauthorized")
 

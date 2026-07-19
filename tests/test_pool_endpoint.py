@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from richard_router.config import (
@@ -117,6 +118,24 @@ class TestPoolEndpoint:
         assert resp.status_code == 401
 
         del os.environ["TEST_POOL_AUTH_KEY"]
+
+    @pytest.mark.parametrize(
+        ("header_name", "header_value"),
+        [
+            (b"authorization", b"Bearer \xff"),
+            (b"x-api-key", b"\xff"),
+        ],
+    )
+    def test_pool_endpoint_rejects_non_ascii_auth_headers(
+        self, monkeypatch, header_name, header_value
+    ):
+        monkeypatch.setenv("TEST_POOL_AUTH_KEY", "supersecret")
+        cfg = RouterConfig(virtual_models={}, inbound_api_key_env="TEST_POOL_AUTH_KEY")
+        client = TestClient(create_app(cfg))
+
+        response = client.get("/v1/pool", headers=[(header_name, header_value)])
+
+        assert response.status_code == 401
 
     def test_upstream_error_secrets_are_redacted_from_pool_and_status_cli(
         self, capsys, monkeypatch
