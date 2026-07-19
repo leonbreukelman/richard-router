@@ -301,6 +301,59 @@ class TestHealthCheckTaskTick:
         assert breaker.consecutive_failures == 0
 
     @pytest.mark.asyncio
+    async def test_probe_400_against_open_breaker_keeps_it_open(self):
+        """A 400 health-check probe against an already-open breaker does not close it.
+
+        Policy (docs/decisions/2026-07-18-half-open-requires-2xx.md): only a
+        2xx probe closes a half-open circuit.  A 400 proves the upstream
+        answered, not that the prior 5xx condition recovered, so the
+        breaker must remain open with cooldown re-armed.
+        """
+        cfg = _make_config(health_enabled=True)
+        metrics = MetricsCollector()
+
+        class FixedClock:
+            def __init__(self) -> None:
+                self.now = 1_000.0
+
+            def __call__(self) -> float:
+                return self.now
+
+        clock = FixedClock()
+        router = RichardRouter(cfg, metrics=metrics, clock=clock)
+
+        nvidia_upstream = next(
+            u for u in cfg.virtual_models["coding"].upstreams if u.name == "nvidia"
+        )
+
+        # Force the breaker into the open state as if a prior 5xx storm opened it.
+        breaker = router._circuit_breaker_state(nvidia_upstream)
+        breaker.opened_at = clock.now - 1.0
+        breaker.consecutive_failures = cfg.failover.circuit_breaker.failure_threshold
+        breaker.half_open_probes = 0
+
+        task = HealthCheckTask(router, cfg.health_check, metrics)
+        # Force metrics to mark nvidia as needing a probe.
+        metrics.record_attempt("coding", "nvidia", "http_error", 503, "TimeoutException")
+
+        fake_client = AsyncMock()
+        fake_client.post = AsyncMock(
+            return_value=httpx.Response(400, json={"error": {"message": "bad probe"}})
+        )
+        # Advance the clock so the probe fires as a genuine half-open attempt.
+        clock.now += cfg.failover.circuit_breaker.cooldown_seconds + 1.0
+        with patch.object(router, "_client_for", return_value=fake_client):
+            await task._tick()
+
+        # Breaker must remain open; opened_at re-armed to the current clock.
+        assert breaker.opened_at is not None
+        assert breaker.opened_at == clock.now
+        # half_open_probes reset so the next post-cooldown request is again a probe.
+        assert breaker.half_open_probes == 0
+        # consecutive_failures untouched by non-retryable 4xx.
+        assert breaker.consecutive_failures == cfg.failover.circuit_breaker.failure_threshold
+
+    @pytest.mark.asyncio
     async def test_task_reschedules_after_tick_exception(self):
         """An exception in _tick doesn't crash the task."""
         cfg = _make_config(health_enabled=True)
