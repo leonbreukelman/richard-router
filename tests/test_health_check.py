@@ -275,6 +275,32 @@ class TestHealthCheckTaskTick:
         assert nvidia_entry["consecutive_failures"] >= 4
 
     @pytest.mark.asyncio
+    async def test_probe_failure_redacts_secrets_but_preserves_error_context(self):
+        cfg = _make_config(health_enabled=True)
+        metrics = MetricsCollector()
+        router = RichardRouter(cfg, metrics=metrics)
+
+        for _ in range(3):
+            metrics.record_attempt("coding", "nvidia", "http_error", 503, "TimeoutException")
+
+        secret = "sk-" + "healthchecksecret" * 2
+        error_message = f"provider health probe rejected api_key={secret}; service unavailable"
+        fake_client = AsyncMock()
+        fake_client.post = AsyncMock(
+            return_value=httpx.Response(503, json={"error": {"message": error_message}})
+        )
+        task = HealthCheckTask(router, cfg.health_check, metrics)
+
+        with patch.object(router, "_client_for", return_value=fake_client):
+            await task._tick()
+
+        stored_message = metrics.snapshot().virtual_models["coding"][0]["last_error_message"]
+        assert secret not in stored_message
+        assert "[REDACTED]" in stored_message
+        assert "provider health probe rejected" in stored_message
+        assert "service unavailable" in stored_message
+
+    @pytest.mark.asyncio
     async def test_probe_400_does_not_record_failure(self):
         """A non-retryable HTTP error (400) does NOT increment consecutive_failures."""
         cfg = _make_config(health_enabled=True)
