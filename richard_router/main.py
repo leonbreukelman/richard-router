@@ -86,11 +86,12 @@ def create_app(
     hc_task: HealthCheckTask | None = None
     if cfg.health_check.enabled:
         hc_task = HealthCheckTask(router, cfg.health_check, metrics)
-        hc_task.start()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
+            if hc_task is not None:
+                hc_task.start()
             yield
         finally:
             if hc_task is not None:
@@ -100,6 +101,7 @@ def create_app(
     app = FastAPI(title="richard-router", version="0.1.0", lifespan=lifespan)
     app.state.router_config = cfg
     app.state.richard_router = router
+    app.state.health_check_task = hc_task
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
