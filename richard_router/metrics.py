@@ -27,6 +27,8 @@ class UpstreamMetrics:
     errors_by_type: dict[str, int] = field(default_factory=lambda: {})
     last_ok: float = 0.0
     last_error: float | None = None
+    latest_error_code: int | None = None
+    latest_error_type: str | None = None
     last_error_message: str | None = None
     consecutive_failures: int = 0
     _window: deque[bool] = field(default_factory=lambda: deque(maxlen=100))
@@ -49,6 +51,8 @@ class UpstreamMetrics:
             self.consecutive_failures = 0
             self.last_ok = now
             self.last_error = None
+            self.latest_error_code = None
+            self.latest_error_type = None
             self.last_error_message = None
             self.errors_by_code.clear()
             self.errors_by_type.clear()
@@ -57,6 +61,8 @@ class UpstreamMetrics:
             self.error_count += 1
             self.consecutive_failures += 1
             self.last_error = now
+            self.latest_error_code = status_code
+            self.latest_error_type = error_type
             self.last_error_message = (
                 redact_text(error_message) if error_message is not None else None
             )
@@ -174,6 +180,8 @@ class MetricsCollector:
                     "errors_by_type": dict(sorted(m.errors_by_type.items())),
                     "last_ok": _format_timestamp(m.last_ok),
                     "last_error": _format_timestamp(m.last_error) if m.last_error else None,
+                    "latest_error_code": m.latest_error_code,
+                    "latest_error_type": m.latest_error_type,
                     "last_error_message": m.last_error_message,
                     "consecutive_failures": m.consecutive_failures,
                 }

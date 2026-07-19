@@ -251,7 +251,8 @@ def _status_cli(args: argparse.Namespace) -> int:
         upstreams = sorted(vms[vm_name], key=lambda u: u["name"])
         for row_idx, up in enumerate(upstreams):
             vm_col = vm_name if row_idx == 0 else ""
-            last_active = up.get("last_ok") or up.get("last_error") or "—"
+            activity_timestamps = [up.get("last_ok"), up.get("last_error")]
+            last_active = max((ts for ts in activity_timestamps if ts), default="—")
             if last_active and last_active != "—":
                 # Trim ISO timestamp to readable form
                 last_active = last_active.replace("T", " ").replace("Z", "")
@@ -260,19 +261,24 @@ def _status_cli(args: argparse.Namespace) -> int:
                 last_error = last_error.replace("T", " ").replace("Z", "")
             # Build error context: most recent code or error type
             error_ctx = ""
-            if up.get("errors_by_code"):
+            if "latest_error_code" in up or "latest_error_type" in up:
+                if up.get("latest_error_code") is not None:
+                    error_ctx = f"Code:{up['latest_error_code']}"
+                elif up.get("latest_error_type"):
+                    error_ctx = f"Type:{up['latest_error_type']}"
+            elif up.get("errors_by_code"):
                 codes = [str(k) for k in up["errors_by_code"]]
                 error_ctx = f"Code:{codes[-1]}"
             elif up.get("errors_by_type"):
                 types = [str(k) for k in up["errors_by_type"]]
                 error_ctx = f"Type:{types[-1]}"
-            
+
             last_error_msg = up.get("last_error_message") or ""
             if last_error_msg:
                 # Truncate message to keep column size reasonable
                 msg = (last_error_msg[:25] + '..') if len(last_error_msg) > 27 else last_error_msg
                 error_ctx = f"{error_ctx} {msg}".strip()
-            
+
             print(
                 f"{vm_col:<20} {up['name']:<30} {up['status']:<11} "
                 f"{up['total_requests']:<8} {up['success_count']:<8} "

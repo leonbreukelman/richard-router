@@ -75,6 +75,8 @@ class TestPoolEndpoint:
         assert upstreams["openrouter"]["total_requests"] == 1
         assert upstreams["openrouter"]["error_count"] == 1
         assert upstreams["openrouter"]["errors_by_code"] == {"503": 1}
+        assert upstreams["openrouter"]["latest_error_code"] == 503
+        assert upstreams["openrouter"]["latest_error_type"] is None
 
     def test_pool_endpoint_auth(self):
         cfg = RouterConfig(
@@ -276,3 +278,78 @@ class TestStatusCLI:
         assert "vm-two" in output
         assert "\n\nvm-two" in output
         assert not output.endswith("\n\n")
+
+    def test_cli_status_uses_latest_timestamps_and_explicit_error_context(
+        self, capsys, monkeypatch
+    ):
+        import argparse
+        import urllib.request
+
+        from richard_router.main import _status_cli
+
+        payload = {
+            "virtual_models": {
+                "coding": [
+                    {
+                        "name": "error-after-success",
+                        "status": "degraded",
+                        "total_requests": 3,
+                        "success_count": 1,
+                        "error_count": 2,
+                        "error_rate_pct": 66.7,
+                        "errors_by_code": {"429": 1, "503": 1},
+                        "errors_by_type": {},
+                        "last_ok": "2026-07-10T20:00:00Z",
+                        "last_error": "2026-07-10T21:00:00Z",
+                        "latest_error_code": 429,
+                        "latest_error_type": None,
+                        "last_error_message": "latest rate limit",
+                    },
+                    {
+                        "name": "success-after-error",
+                        "status": "healthy",
+                        "total_requests": 2,
+                        "success_count": 1,
+                        "error_count": 1,
+                        "error_rate_pct": 50.0,
+                        "errors_by_code": {},
+                        "errors_by_type": {"ZuluError": 1, "AlphaError": 1},
+                        "last_ok": "2026-07-10T22:00:00Z",
+                        "last_error": "2026-07-10T21:00:00Z",
+                        "latest_error_code": None,
+                        "latest_error_type": "AlphaError",
+                        "last_error_message": "latest typed failure",
+                    },
+                ]
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: FakeResponse())
+        args = argparse.Namespace(
+            url="http://router.test",
+            vm=None,
+            json=False,
+            api_key_env="",
+            timeout=2,
+        )
+
+        assert _status_cli(args) == 0
+        output = capsys.readouterr().out
+        error_row = next(line for line in output.splitlines() if "error-after-success" in line)
+        success_row = next(line for line in output.splitlines() if "success-after-error" in line)
+        assert "2026-07-10 21:00:00" in error_row
+        assert "Code:429 latest rate limit" in error_row
+        assert "Code:503" not in error_row
+        assert "2026-07-10 22:00:00" in success_row
+        assert "Type:AlphaError latest typed failure" in success_row
+        assert "Type:ZuluError" not in success_row
