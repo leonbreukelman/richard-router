@@ -42,6 +42,24 @@ class TestUpstreamMetrics:
         assert m.errors_by_type == {"TimeoutException": 1, "ConnectError": 1}
         assert len(m._window) == 2
 
+    def test_latest_error_context_follows_event_order(self):
+        m = UpstreamMetrics()
+        m.record("http_error", 503, None, "older failure")
+        m.record("http_error", 429, None, "latest failure")
+
+        assert m.errors_by_code == {503: 1, 429: 1}
+        assert m.latest_error_code == 429
+        assert m.latest_error_type is None
+        assert m.last_error_message == "latest failure"
+
+        m.record("timeout", None, "AlphaError", "latest typed failure")
+
+        assert m.errors_by_code == {503: 1, 429: 1}
+        assert m.errors_by_type == {"AlphaError": 1}
+        assert m.latest_error_code is None
+        assert m.latest_error_type == "AlphaError"
+        assert m.last_error_message == "latest typed failure"
+
     def test_consecutive_failures_resets_on_success(self):
         m = UpstreamMetrics()
         m.record("http_error", 503, None)
@@ -51,6 +69,8 @@ class TestUpstreamMetrics:
         m.record("success", 200, None)
         assert m.consecutive_failures == 0
         assert m.success_count == 1
+        assert m.latest_error_code is None
+        assert m.latest_error_type is None
 
     def test_rolling_window_evicts_old_entries(self):
         m = UpstreamMetrics()
@@ -195,6 +215,8 @@ class TestMetricsCollector:
         entry = snap.virtual_models["vm1"][0]
         assert entry["errors_by_code"] == {429: 2, 503: 1}
         assert entry["errors_by_type"] == {"TimeoutException": 1}
+        assert entry["latest_error_code"] is None
+        assert entry["latest_error_type"] == "TimeoutException"
 
     def test_empty_collector_snapshot(self):
         c = MetricsCollector()
