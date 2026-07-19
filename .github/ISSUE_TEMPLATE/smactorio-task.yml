@@ -1,0 +1,85 @@
+name: SmactorIO task
+description: Request maintainer triage for a bounded low-risk SmactorIO task
+title: "[SmactorIO] "
+labels:
+  - "smactorio"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form requests maintainer triage; it does not guarantee pickup.
+
+        Read [CONTRIBUTING.md](https://github.com/leonbreukelman/richard-router/blob/main/CONTRIBUTING.md) first. The form applies only `smactorio`. After triage, a maintainer adds `autonomy:ready` and `risk:low` to authorize pickup. All issue-state, title, path, secret-scanning, independent-review, CI, and exact-head merge gates still apply.
+
+        Do not manually add or remove `smactorio:claimed`, `smactorio:blocked`, `smactorio:needs-attention`, or `smactorio:done`.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Owner or user outcome
+      description: State the observable result, not just the implementation mechanism.
+      placeholder: A caller receives a clear 4xx response when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Current behavior and evidence
+      description: Describe the current behavior and provide a minimal reproduction, failing test, or source reference.
+      placeholder: |
+        Current behavior:
+        Reproduction or source evidence:
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List objective, independently verifiable completion conditions.
+      placeholder: |
+        - [ ] Regression test fails before the fix and passes after it.
+        - [ ] Existing behavior remains covered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Expected file scope
+      description: Name the likely files or allowed directories. SmactorIO is restricted to the public autonomous path boundary in CONTRIBUTING.md.
+      placeholder: |
+        richard_router/...
+        tests/...
+        docs/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test plan
+      description: State the focused checks that should prove the change without live credentials or production access.
+      placeholder: |
+        uv run ruff check .
+        uv run pytest tests/test_specific_behavior.py -v
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety and triage confirmation
+      description: Maintainer authorization happens after this request is reviewed.
+      options:
+        - label: This task does not require production or deployment changes.
+          required: true
+        - label: This task does not require credentials, secrets, authentication, 2FA, or account recovery.
+          required: true
+        - label: This task does not require billing, spend, payment, destructive actions, or branch-protection changes.
+          required: true
+        - label: This task does not require security/compliance, strategic/product, or research judgment.
+          required: true
+        - label: I understand that filing this form does not guarantee pickup and that a maintainer must authorize the task.
+          required: true
