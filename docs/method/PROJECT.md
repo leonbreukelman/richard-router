@@ -3,7 +3,7 @@
 Local instantiation of `docs/method/METHOD.md`. This is the only method file edited per repo. It may select a globally defined lifecycle mode and add stricter constraints; it may not loosen the global contract.
 
 Generated: 2026-07-07
-Updated: 2026-07-08
+Updated: 2026-07-19
 
 ## Lifecycle mode
 
@@ -14,11 +14,15 @@ This repo is live on GitHub and now uses per-phase feature branches and PRs. Don
 
 ## Protected / frozen paths
 
-No repo-specific generated/frozen paths declared.
+The SmactorIO autonomous allowlist is deliberately narrow: only `richard_router/`, `tests/` except `tests/test_repository_guidance.py`, `docs/` except `docs/method/`, `README.md`, and `config/router.example.yaml` are autonomous-worker scope. Everything else is human-controlled.
 
-Always protected by method/repo policy:
+Protected examples include:
+- Governance and contributor contract: `AGENTS.md`, `CONTRIBUTING.md`, `.github/`, `docs/method/`, `tests/test_repository_guidance.py`.
+- Dependency/build boundaries: `pyproject.toml`, `uv.lock`, `.gitmodules`, `Dockerfile`.
 - Secret material and local config: `.env*`, `config/router.yaml`, `config/*.local.yaml`.
 - Ignored local evidence and runtime artifacts: `reports/`, `.venv/`, caches, and logs.
+
+Normal human-reviewed PRs may propose a protected-path change when explicitly justified. Intake labels do not put those paths into autonomous scope.
 
 ## Gate commands
 
@@ -29,6 +33,8 @@ Always protected by method/repo policy:
 
 present — `.github/workflows/ci.yml` runs `uv sync --all-groups`, `uv run ruff check .`, and `uv run pytest -v` on push and PR to `main`.
 
+Live `main` branch protection strictly requires `uv / ruff / pytest` on the current PR head before merge.
+
 ## Connector scope
 
 Remote: `git@github.com:leonbreukelman/richard-router.git` / `https://github.com/leonbreukelman/richard-router`.
@@ -38,6 +44,13 @@ Default branch: `main`.
 Visibility: public.
 
 Connector scope: GitHub PR lifecycle for scoped branches only. No deploy, production mutation, credential change, or destructive repository action is implied by this card.
+
+## Contributor and SmactorIO contract
+
+- Public contribution and pre-PR instructions: `CONTRIBUTING.md`.
+- SmactorIO requests start through `.github/ISSUE_TEMPLATE/smactorio-task.yml`.
+- The form applies only `smactorio`; a maintainer adds `autonomy:ready` and `risk:low` after triage.
+- Runtime lifecycle labels are not contributor-controlled.
 
 ## Documentation discipline
 
@@ -92,14 +105,11 @@ Verifier: Hermes/Leon flow checks ledger against live evidence.
 
 ## Current repo facts
 
-- Repo path: `/home/leonb/projects/richard-router`
-- Git root: `/home/leonb/projects/richard-router`
-- Base SHA at install: `unknown`
-- Current Track F base SHA: `7bcbf7e11ed3ced49e9bf8b51215ed3eea8860a0`
-- Origin: `git@github.com:leonbreukelman/richard-router.git`
+- Working-tree path is contributor-specific; resolve the root with `git rev-parse --show-toplevel`.
+- Resolve the base from current `origin/main` before every task; do not trust a stored SHA.
+- Canonical remote: `git@github.com:leonbreukelman/richard-router.git` / `https://github.com/leonbreukelman/richard-router`.
 - GitHub repo: `leonbreukelman/richard-router` (`public`)
 
 ## Open decisions
 
-- Consider adding branch protection requiring the `uv / ruff / pytest` CI job after Phase 0 lands.
 - Confirm any future generated/frozen paths before expanding scope beyond this Track F uplift.

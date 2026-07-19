@@ -223,6 +223,12 @@ emission. Set `observability.decision_log_enabled: false` to silence these logs.
 For streaming requests, a logged `success` means an upstream was selected and
 returned 2xx headers; it does not prove the whole stream body completed.
 
+## Contributing and SmactorIO
+
+Humans and coding agents must read [CONTRIBUTING.md](CONTRIBUTING.md) before creating an issue or pull request. It defines the repository checks, autonomous path boundary, protected files, and documentation expectations.
+
+To request autonomous work, use the [SmactorIO task form](.github/ISSUE_TEMPLATE/smactorio-task.yml). The form applies only `smactorio` for maintainer triage. After confirming that the task is bounded and low-risk, a maintainer adds `autonomy:ready` and `risk:low`; all three labels are required before SmactorIO can consider the issue. Labels do not bypass the remaining safety, review, secret-scanning, or CI gates.
+
 ## Development
 
 ```bash
