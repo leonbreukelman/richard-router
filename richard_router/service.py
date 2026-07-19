@@ -828,9 +828,18 @@ class RichardRouter:
         stream_cm: Any,
         virtual_model: str,
     ) -> AsyncIterator[bytes]:
+        remainder = b""
         try:
             async for chunk in response.aiter_bytes():
-                yield RichardRouter._rewrite_sse_chunk(chunk, virtual_model)
+                remainder += chunk
+                complete_lines, separator, remainder = remainder.rpartition(b"\n")
+                if separator:
+                    yield RichardRouter._rewrite_sse_chunk(
+                        complete_lines + separator,
+                        virtual_model,
+                    )
+            if remainder:
+                yield RichardRouter._rewrite_sse_chunk(remainder, virtual_model)
         finally:
             await stream_cm.__aexit__(None, None, None)
 
