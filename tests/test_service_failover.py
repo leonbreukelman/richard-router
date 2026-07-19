@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import replace
+from typing import cast
 
 import httpx
 import pytest
@@ -18,6 +20,19 @@ def _client_factory(handler):
         return httpx.AsyncClient(transport=transport)
 
     return factory
+
+
+class ChunkedSSEStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _config_with_retry_policy(retry_on_status: tuple[int, ...] | None) -> object:
@@ -340,6 +355,98 @@ async def test_streaming_rewrites_model_to_virtual_name():
     assert b'"model":"coding"' in payload
     assert b"nvidia-real-model" not in payload
     assert b"data: [DONE]" in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+async def test_streaming_rewrite_is_independent_of_byte_chunk_boundaries(newline):
+    upstream_event = (
+        b": keep this comment"
+        + newline
+        + b"event: message"
+        + newline
+        + 'data: {"id":"chunk-1","model":"nvidia-real-model",'
+        '"choices":[{"delta":{"content":"caf\u00e9 \u2603"}}]}'.encode()
+        + newline
+        + newline
+        + b"data: [DONE]"
+        + newline
+        + newline
+    )
+    stream = ChunkedSSEStream(
+        [upstream_event[index : index + 1] for index in range(len(upstream_event))]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    router = RichardRouter(make_test_config(), _client_factory(handler))
+    routed = await router.open_stream({"model": "coding", "messages": [], "stream": True})
+    payload = b"".join([chunk async for chunk in routed.iterator])
+
+    assert payload.startswith(b": keep this comment" + newline + b"event: message" + newline)
+    assert payload.endswith(newline + b"data: [DONE]" + newline + newline)
+    assert payload.count(newline) == upstream_event.count(newline)
+    data_line = payload.split(newline)[2]
+    rewritten = json.loads(data_line.removeprefix(b"data: "))
+    assert rewritten["model"] == "coding"
+    assert rewritten["choices"][0]["delta"]["content"] == "caf" + chr(233) + " " + chr(9731)
+    assert b"nvidia-real-model" not in payload
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_streaming_rewrites_final_unterminated_data_line_and_closes_stream():
+    stream = ChunkedSSEStream(
+        [b"da", b'ta: {"model":"nvidia-', b'real-model","choices":[]}']
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    router = RichardRouter(make_test_config(), _client_factory(handler))
+    routed = await router.open_stream({"model": "coding", "messages": [], "stream": True})
+    payload = b"".join([chunk async for chunk in routed.iterator])
+
+    assert json.loads(payload.removeprefix(b"data: "))["model"] == "coding"
+    assert b"nvidia-real-model" not in payload
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_streaming_closes_chunked_stream_when_consumer_cancels():
+    stream = ChunkedSSEStream(
+        [
+            b'data: {"model":"nvidia-real-model","choices":[]}\n',
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    router = RichardRouter(make_test_config(), _client_factory(handler))
+    routed = await router.open_stream({"model": "coding", "messages": [], "stream": True})
+    assert isinstance(routed, RouterStream)
+    iterator = cast(AsyncGenerator[bytes, None], routed.iterator)
+
+    first_chunk = await anext(iterator)
+    await iterator.aclose()
+
+    assert b'"model":"coding"' in first_chunk
+    assert stream.closed
 
 
 @pytest.mark.asyncio
