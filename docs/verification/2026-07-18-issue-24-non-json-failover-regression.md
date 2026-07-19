@@ -28,3 +28,9 @@ The reviewer confirmed the tests drive the real `_extract_error_message` branche
 ## Operator value
 
 Issue #24 needed no production patch because current `main` already contains the safe error extractor. These tests turn that verified behavior into a durable CI regression instead of relying on a one-time service canary.
+
+## Live steward canary
+
+The first exact-head stewardship attempt failed closed before correspondence when the controller invalidated its own GitHub status observation. After that repair, the next attempt reached the local sandbox and correctly posted a public `BLOCK` without merging because nested bubblewrap could not mount procfs under the parent systemd kernel protections.
+
+Control-plane PRs #115 and #116 repaired those controller defects without weakening the service boundary: status/check state is reconstructed completely, PID/network/IPC namespaces remain active, `/proc` is empty, and the disposable checkout's `.git` metadata is read-only to hostile tests. This documentation-only commit deliberately advances the PR head so the repaired steward can perform a fresh exact-head evaluation rather than suppressing the previously recorded blocked fingerprint.
