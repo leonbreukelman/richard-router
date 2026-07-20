@@ -4,6 +4,10 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SMACTORIO_FORM_URL = (
+    "https://github.com/leonbreukelman/richard-router/issues/new"
+    "?template=smactorio-task.yml"
+)
 
 
 def read_repo_file(relative_path: str) -> str:
@@ -68,6 +72,45 @@ def test_smactorio_issue_form_requests_triage_without_self_authorizing_pickup() 
     assert "Maintainer authorization" in issue_form
     assert "does not guarantee pickup" in issue_form
     assert "CONTRIBUTING.md" in issue_form
+
+
+def test_smactorio_guidance_has_executable_filing_and_triage_paths() -> None:
+    contributing = read_repo_file("CONTRIBUTING.md")
+    readme = read_repo_file("README.md")
+
+    form_link = f"[new SmactorIO task]({SMACTORIO_FORM_URL})"
+    source_link = "[SmactorIO task form](.github/ISSUE_TEMPLATE/smactorio-task.yml)"
+
+    assert form_link in contributing
+    assert form_link in readme
+    assert source_link in contributing
+    assert contributing.index(form_link) < contributing.index(source_link)
+
+    bash_blocks = re.findall(r"```bash\n(?P<commands>.*?)```", contributing, re.DOTALL)
+    create_block = next(block for block in bash_blocks if "gh issue create" in block)
+    edit_block = next(block for block in bash_blocks if "gh issue edit" in block)
+
+    assert contributing.count("gh issue create") == 1
+    assert contributing.count("gh issue edit") == 1
+    assert contributing.count("gh issue view") == 2
+    assert "--label smactorio" in create_block
+    assert "autonomy:ready" not in create_block
+    assert "risk:low" not in create_block
+    assert "--add-label autonomy:ready" in edit_block
+    assert "--add-label risk:low" in edit_block
+    assert contributing.index("gh issue view") < contributing.index("gh issue edit")
+    assert contributing.rindex("gh issue view") > contributing.index("gh issue edit")
+    assert "maintainer-only" in contributing.lower()
+    assert "never run during issue creation" in contributing.lower()
+    for section in (
+        "owner or user outcome",
+        "current behavior and evidence",
+        "acceptance criteria",
+        "expected file scope",
+        "test plan",
+        "safety and triage confirmations",
+    ):
+        assert section in contributing.lower()
 
 
 def test_pull_request_template_puts_required_gates_in_every_pr() -> None:

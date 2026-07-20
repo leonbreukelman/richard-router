@@ -25,3 +25,15 @@ Decision:
 - Record the live `uv / ruff / pytest` branch-protection requirement and describe autonomous scope allowlist-first.
 
 Rationale: public issue templates apply configured labels regardless of the filer’s permissions. Auto-applying all three required labels would let an arbitrary public user self-authorize autonomous work. Separating triage request (`smactorio`) from maintainer authorization (`autonomy:ready` plus `risk:low`) makes the process discoverable without weakening the existing trust boundary.
+
+## 2026-07-20 — Make SmactorIO ticket filing executable for coding agents
+
+The published intake contract explained the label and authorization policy, but its filing links opened the tracked YAML source rather than the GitHub new-issue form. It also omitted exact CLI creation, triage-label, and readback commands, leaving unfamiliar coding agents dependent on outside GitHub knowledge.
+
+Decision:
+- Keep the browser issue form as the normal public path and add its direct `issues/new?template=smactorio-task.yml` URL alongside the retained source link.
+- Add an explicit maintainer-only GitHub CLI path that creates with only `smactorio`, reads the complete issue back, verifies all form-equivalent safety confirmations, and adds `autonomy:ready` plus `risk:low` only after triage.
+- Require a final GitHub label readback and preserve the prohibition on manually managing runtime lifecycle labels.
+- Extend the human-controlled repository-guidance test with positive execution-entrypoint checks and a negative assertion that readiness labels never appear in the create command.
+
+Rationale: execution instructions should be copyable without weakening authorization. Public contributors retain the form's safe single-label behavior; only identities with repository triage permission receive a documented CLI authorization path, and the readiness labels remain a separate post-readback action.

@@ -32,9 +32,43 @@ GitHub must report the exact required check `uv / ruff / pytest` as successful b
 
 ## Requesting SmactorIO work
 
-Use the [SmactorIO task form](.github/ISSUE_TEMPLATE/smactorio-task.yml) to request maintainer triage for a bounded low-risk task.
+Open a [new SmactorIO task](https://github.com/leonbreukelman/richard-router/issues/new?template=smactorio-task.yml) to request maintainer triage for a bounded low-risk task. The tracked source is `.github/ISSUE_TEMPLATE/smactorio-task.yml`; see the [SmactorIO task form](.github/ISSUE_TEMPLATE/smactorio-task.yml) when reviewing changes to the form itself.
 
 The form applies only `smactorio`. It does not authorize autonomous pickup.
+
+### Exact filing path for maintainer coding agents
+
+The browser form is the normal path for public contributors and their agents because it can apply `smactorio` without granting them repository label permissions.
+
+A maintainer-authorized coding agent with repository triage permission may instead use GitHub CLI. Its completed body file must contain the same required sections as the browser form:
+
+- owner or user outcome;
+- current behavior and evidence;
+- acceptance criteria;
+- expected file scope;
+- test plan; and
+- safety and triage confirmations covering every required checkbox in the form.
+
+Replace the example title and body path, then create the issue with only the intake label:
+
+```bash
+gh issue create \
+  --repo leonbreukelman/richard-router \
+  --title "[SmactorIO] Replace with the observable outcome" \
+  --body-file /absolute/path/to/completed-smactorio-request.md \
+  --label smactorio
+```
+
+Use the issue number returned by GitHub and read the complete issue back before authorization:
+
+```bash
+ISSUE_NUMBER=123
+gh issue view "$ISSUE_NUMBER" \
+  --repo leonbreukelman/richard-router \
+  --json number,state,title,body,labels
+```
+
+Confirm that the issue is open, every required body section is complete, all safety and triage confirmations are present, and the task meets the criteria below.
 
 A maintainer adds `autonomy:ready` and `risk:low` after confirming that the issue is:
 
@@ -43,6 +77,24 @@ A maintainer adds `autonomy:ready` and `risk:low` after confirming that the issu
 - reversible and low-risk;
 - clear about acceptance criteria, expected files, and tests; and
 - inside the current autonomous path boundary.
+
+The following command is maintainer-only, requires repository triage permission, and must never run during issue creation:
+
+```bash
+gh issue edit "$ISSUE_NUMBER" \
+  --repo leonbreukelman/richard-router \
+  --add-label autonomy:ready \
+  --add-label risk:low
+```
+
+Verify the final state and labels from GitHub:
+
+```bash
+gh issue view "$ISSUE_NUMBER" \
+  --repo leonbreukelman/richard-router \
+  --json state,labels \
+  --jq '{state, labels: [.labels[].name]}'
+```
 
 The complete required label set is therefore:
 
