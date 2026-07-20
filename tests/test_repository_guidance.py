@@ -87,9 +87,11 @@ def test_smactorio_guidance_has_executable_filing_and_triage_paths() -> None:
     assert contributing.index(form_link) < contributing.index(source_link)
 
     bash_blocks = re.findall(r"```bash\n(?P<commands>.*?)```", contributing, re.DOTALL)
-    create_block = next(block for block in bash_blocks if "gh issue create" in block)
-    edit_block = next(block for block in bash_blocks if "gh issue edit" in block)
+    create_block = next((block for block in bash_blocks if "gh issue create" in block), "")
+    edit_block = next((block for block in bash_blocks if "gh issue edit" in block), "")
 
+    assert create_block, "CONTRIBUTING.md must contain a bash gh issue create example"
+    assert edit_block, "CONTRIBUTING.md must contain a bash gh issue edit example"
     assert contributing.count("gh issue create") == 1
     assert contributing.count("gh issue edit") == 1
     assert contributing.count("gh issue view") == 2

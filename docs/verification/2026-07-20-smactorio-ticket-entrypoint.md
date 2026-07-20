@@ -66,6 +66,8 @@ Post-review verification:
 - `uv run pytest -v` — `175 passed in 0.80s`.
 - `git diff --check` — passed.
 
+GitHub Copilot reviewed all six PR files and identified one non-behavioral test-diagnostic issue: missing command fences raised `StopIteration` instead of a clear assertion. The test now uses explicit assertion messages for absent create/edit command blocks; gates were rerun on the amended PR head.
+
 ## GitHub evidence boundary
 
 PR URL, implementation and merge SHAs, GitHub-read changed files, exact-head CI, push-to-main CI, and branch deletion will be read back after publication and reported in the final evidence ledger. They are not claimed by this pre-PR artifact.
