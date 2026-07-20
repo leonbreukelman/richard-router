@@ -4,9 +4,12 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from richard_router.redaction import redact_text
+
+if TYPE_CHECKING:
+    from richard_router.service import HealthCheckTask
 
 Status = str  # "healthy" | "degraded" | "down"
 
@@ -132,6 +135,7 @@ class MetricsCollector:
         down_threshold: int = 5,
         degraded_threshold: int = 3,
         degraded_error_pct: float = 20.0,
+        health_check_task: HealthCheckTask | None = None,
     ) -> None:
         self._upstreams: dict[tuple[str, str], UpstreamMetrics] = {}
         self._lock = Lock()
@@ -139,6 +143,7 @@ class MetricsCollector:
         self.down_threshold = down_threshold
         self.degraded_threshold = degraded_threshold
         self.degraded_error_pct = degraded_error_pct
+        self.health_check_task = health_check_task
 
     def record_attempt(
         self,
@@ -163,8 +168,20 @@ class MetricsCollector:
 
     def snapshot(self) -> MetricsSnapshot:
         group: dict[str, list[dict[str, Any]]] = {}
+        # Build the next-probe map once per snapshot; key is (vm, upstream_name).
+        next_probe_map: dict[tuple[str, str], float] = {}
+        if self.health_check_task is not None:
+            next_probe_map = self.health_check_task.next_probe_at_by_key()
+            # Monotonic→epoch conversion for snapshot formatting. Drift is bounded
+            # to snapshot-time skew between time.time() and time.monotonic(), which
+            # is sub-millisecond on Linux for advisory scheduling data.
+            epoch_offset = time.time() - time.monotonic()
+            next_probe_map = {k: v + epoch_offset for k, v in next_probe_map.items()}
         with self._lock:
             for (vm, upstream), m in self._upstreams.items():
+                # next_probe_at lookup falls back to None when the host has not
+                # yet been tracked in the backoff table (still healthy / never probed).
+                next_probe_at_epoch = next_probe_map.get((vm, upstream))
                 entry: dict[str, Any] = {
                     "name": upstream,
                     "status": m.classify(
@@ -184,6 +201,9 @@ class MetricsCollector:
                     "latest_error_type": m.latest_error_type,
                     "last_error_message": m.last_error_message,
                     "consecutive_failures": m.consecutive_failures,
+                    "next_probe_at": _format_timestamp(next_probe_at_epoch)
+                    if next_probe_at_epoch
+                    else None,
                 }
                 group.setdefault(vm, []).append(entry)
         return MetricsSnapshot(virtual_models=group)

@@ -87,6 +87,11 @@ class HealthCheckConfig:
     probe_max_tokens: int = 1
     probe_timeout_seconds: float = 10.0
     probe_statuses: tuple[str, ...] = ("degraded", "down")
+    # Decaying backoff (see docs/specs/2026-07-20-decaying-health-check.md).
+    # Defaults reproduce the prior fixed-interval behaviour when multiplier=1.0.
+    backoff_base_seconds: float = 60.0
+    backoff_max_seconds: float = 1800.0
+    backoff_multiplier: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,9 @@ class HealthCheckConfigModel(BaseModel):
     probe_max_tokens: int = 1
     probe_timeout_seconds: float = 10.0
     probe_statuses: list[str] = Field(default_factory=lambda: ["degraded", "down"])
+    backoff_base_seconds: float = 60.0
+    backoff_max_seconds: float = 1800.0
+    backoff_multiplier: float = 2.0
 
 
 class AuthConfigModel(BaseModel):
@@ -266,6 +274,15 @@ def _validate_health_check_values(
                 f"health_check.probe_statuses contains unknown status: {status} "
                 f"(valid: {', '.join(sorted(_VALID_PROBE_STATUSES))})"
             )
+    if health_check.backoff_base_seconds < 1.0:
+        problems.append("health_check.backoff_base_seconds must be at least 1.0")
+    if health_check.backoff_max_seconds < health_check.backoff_base_seconds:
+        problems.append(
+            "health_check.backoff_max_seconds must be greater than or equal to "
+            "backoff_base_seconds"
+        )
+    if health_check.backoff_multiplier < 1.0:
+        problems.append("health_check.backoff_multiplier must be at least 1.0")
     return problems
 
 
@@ -493,6 +510,9 @@ def _build_router_config(model: RouterConfigModel) -> RouterConfig:
         probe_max_tokens=max(1, int(hc.probe_max_tokens)),
         probe_timeout_seconds=max(1.0, float(hc.probe_timeout_seconds)),
         probe_statuses=tuple(str(s) for s in hc.probe_statuses),
+        backoff_base_seconds=max(1.0, float(hc.backoff_base_seconds)),
+        backoff_max_seconds=max(1.0, float(hc.backoff_max_seconds)),
+        backoff_multiplier=max(1.0, float(hc.backoff_multiplier)),
     )
 
     return RouterConfig(

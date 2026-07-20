@@ -876,6 +876,38 @@ class HealthCheckTask:
         self._metrics = metrics
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        # Decaying-backoff state (see docs/specs/2026-07-20-decaying-health-check.md).
+        # Per-upstream earliest-next-probe timestamps and consecutive probe failures.
+        # Backoff is owned by the task, not by UpstreamMetrics, so that a single
+        # real-traffic success cannot collapse the probe schedule for a still-sick host.
+        self._next_probe_at: dict[ClientCacheKey, float] = {}
+        self._probe_failures: dict[ClientCacheKey, int] = {}
+
+    def get_next_probe_at(self, upstream: Upstream) -> float | None:
+        """Earliest monotonic timestamp the upstream may be probed again, or None."""
+        return self._next_probe_at.get(self._router._client_cache_key(upstream))
+
+    def next_probe_at_by_key(self) -> dict[tuple[str, str], float]:
+        """Return ``{(vm_name, upstream_name): next_probe_at}`` for snapshot rendering.
+
+        Built fresh on each call from the router's virtual-model topology. Upstream
+        cache keys not currently tracked in the backoff table are omitted — the
+        snapshot accessor fills ``None`` for any ``(vm, upstream)`` not present here.
+        """
+        out: dict[tuple[str, str], float] = {}
+        for vm_name, virtual in self._router.config.virtual_models.items():
+            for upstream in virtual.upstreams:
+                cache_key = self._router._client_cache_key(upstream)
+                ts = self._next_probe_at.get(cache_key)
+                if ts is not None:
+                    out[(vm_name, upstream.name)] = ts
+        return out
+
+    def _compute_soonest_probe(self) -> float | None:
+        """Earliest in-flight backoff timestamp, or None if nothing is being tracked."""
+        if not self._next_probe_at:
+            return None
+        return min(self._next_probe_at.values())
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -896,22 +928,33 @@ class HealthCheckTask:
         logger.info("health check task stopped")
 
     async def _run(self) -> None:
-        """Main loop: tick, sleep interval, repeat until stopped."""
+        """Main loop: tick, sleep until the next probe is due or interval elapses, repeat.
+
+        Sleep adapts to the soonest-due in-flight probe so a freshly-degraded host
+        is not held hostage to another host's long backoff tail.
+        """
+        config = self._config
         while not self._stop_event.is_set():
             try:
                 await self._tick()
             except Exception:
                 logger.warning("richard_router.health_check_tick_failed", exc_info=True)
+            sleep_for = config.interval_seconds
+            soonest = self._compute_soonest_probe()
+            if soonest is not None:
+                sleep_for = min(sleep_for, max(0.0, soonest - self._router.clock()))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self._config.interval_seconds
+                    self._stop_event.wait(), timeout=sleep_for
                 )
 
     async def _tick(self) -> None:
-        """Probe all upstreams whose status is in ``probe_statuses``."""
+        """Probe all upstreams whose status is in ``probe_statuses`` and whose
+        backoff window has elapsed."""
         snapshot = self._metrics.snapshot()
         probe_statuses = set(self._config.probe_statuses)
         cfg = self._router.config
+        now = self._router.clock()
 
         for vm_name in sorted(snapshot.virtual_models):
             entries = snapshot.virtual_models[vm_name]
@@ -927,7 +970,31 @@ class HealthCheckTask:
                 )
                 if upstream is None:
                     continue
+                cache_key = self._router._client_cache_key(upstream)
+                # Skip if this upstream is still in its backoff window.
+                if now < self._next_probe_at.get(cache_key, 0.0):
+                    continue
                 await self._probe_upstream(upstream, virtual.name)
+
+    def _advance_backoff(self, upstream: Upstream) -> None:
+        """On a probe failure: grow the backoff curve (capped at backoff_max)."""
+        cache_key = self._router._client_cache_key(upstream)
+        failures = self._probe_failures.get(cache_key, 0) + 1
+        self._probe_failures[cache_key] = failures
+        cfg = self._config
+        delay = min(
+            cfg.backoff_base_seconds * (cfg.backoff_multiplier ** (failures - 1)),
+            cfg.backoff_max_seconds,
+        )
+        self._next_probe_at[cache_key] = self._router.clock() + delay
+
+    def _reset_backoff(self, upstream: Upstream) -> None:
+        """On a probe success: collapse the backoff curve back to the base interval."""
+        cache_key = self._router._client_cache_key(upstream)
+        self._probe_failures[cache_key] = 0
+        self._next_probe_at[cache_key] = (
+            self._router.clock() + self._config.backoff_base_seconds
+        )
 
     async def _probe_upstream(self, upstream: Upstream, vm_name: str) -> None:
         """Send a minimal probe to one upstream and record the outcome."""
@@ -958,6 +1025,7 @@ class HealthCheckTask:
                 self._metrics.record_attempt(
                     vm_name, upstream.name, "timeout", error_type="TimeoutException"
                 )
+            self._advance_backoff(upstream)
             logger.debug("health check probe timeout: %s", upstream.name)
             return
         except httpx.TransportError as exc:
@@ -967,6 +1035,7 @@ class HealthCheckTask:
                 self._metrics.record_attempt(
                     vm_name, upstream.name, "connection_error", error_type=type(exc).__name__
                 )
+            self._advance_backoff(upstream)
             logger.debug("health check probe transport error: %s", upstream.name)
             return
 
@@ -976,6 +1045,7 @@ class HealthCheckTask:
                 self._metrics.record_attempt(
                     vm_name, upstream.name, "success", status_code=response.status_code
                 )
+            self._reset_backoff(upstream)
             logger.debug("health check probe recovered: %s", upstream.name)
             return
 
@@ -994,6 +1064,7 @@ class HealthCheckTask:
                 status_code=response.status_code,
                 error_message=error_message,
             )
+        self._advance_backoff(upstream)
         logger.debug(
             "health check probe http error: %s status=%s", upstream.name, response.status_code
         )
