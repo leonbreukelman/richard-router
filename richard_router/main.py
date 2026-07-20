@@ -97,6 +97,8 @@ def create_app(
     hc_task: HealthCheckTask | None = None
     if cfg.health_check.enabled:
         hc_task = HealthCheckTask(router, cfg.health_check, metrics)
+        # Back-reference so /v1/pool snapshot can include next_probe_at scheduling data.
+        metrics.health_check_task = hc_task
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:

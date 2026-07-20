@@ -53,6 +53,13 @@ observability:
 #   probe_max_tokens: 1         # Minimal token cost per probe
 #   probe_timeout_seconds: 10   # Per-probe timeout (fail fast)
 #   probe_statuses: ["degraded", "down"]  # Which statuses trigger a probe
+#   # --- Decaying backoff (optional, see docs/specs/2026-07-20-decaying-health-check.md) ---
+#   # The probe interval grows exponentially for persistently failing hosts so a
+#   # terminally-down member is probed less often, avoiding rate-limit self-harm
+#   # on free-tier upstreams. Set backoff_multiplier: 1.0 for fixed-interval behaviour.
+#   backoff_base_seconds: 60      # Starting interval when a host begins failing
+#   backoff_max_seconds: 1800     # Cap at 30 minutes
+#   backoff_multiplier: 2.0       # Exponential growth factor per consecutive probe failure
 
 virtual_models:
   coding:
