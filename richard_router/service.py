@@ -222,6 +222,10 @@ class RichardRouter:
     def _rewrite_body(body: dict[str, Any], upstream: Upstream) -> dict[str, Any]:
         rewritten = dict(body)
         rewritten["model"] = upstream.model
+        # Hard-pin to specific upstream providers via the OpenAI-compatible
+        # `provider: {"only": [...]}` body field (honors OpenRouter guardrails).
+        if upstream.provider_pin:
+            rewritten["provider"] = {"only": list(upstream.provider_pin)}
         return rewritten
 
     @staticmethod

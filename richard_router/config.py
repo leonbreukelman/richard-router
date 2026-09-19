@@ -33,6 +33,7 @@ class Upstream:
     pool_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS
     priority: int = 1
     weight: int = 100
+    provider_pin: tuple[str, ...] = ()
 
     @property
     def chat_completions_url(self) -> str:
@@ -134,6 +135,7 @@ class UpstreamConfigModel(BaseModel):
     pool_timeout_seconds: float | None = None
     priority: int = 1
     weight: int = 100
+    provider_pin: list[str] | None = None
 
 
 class VirtualModelConfigModel(BaseModel):
@@ -330,6 +332,10 @@ def _validate_normalized_config(cfg: RouterConfig, env: Mapping[str, str]) -> li
                 problems.append(f"{prefix}.priority must be at least 1")
             if upstream.weight < 1:
                 problems.append(f"{prefix}.weight must be at least 1")
+            if upstream.provider_pin and not all(
+                str(p).strip() for p in upstream.provider_pin
+            ):
+                problems.append(f"{prefix}.provider_pin entries must be non-empty")
     return problems
 
 
@@ -379,6 +385,10 @@ def validate_config(cfg: ConfigInput, env: Mapping[str, str] | None = None) -> l
                 problems.append(f"{prefix}.priority must be at least 1")
             if upstream.weight < 1:
                 problems.append(f"{prefix}.weight must be at least 1")
+            if upstream.provider_pin and not all(
+                str(p).strip() for p in upstream.provider_pin
+            ):
+                problems.append(f"{prefix}.provider_pin entries must be non-empty")
     return problems
 
 
@@ -471,6 +481,7 @@ def _normalize_upstream(
         ),
         priority=max(1, int(upstream.priority)),
         weight=max(1, int(upstream.weight)),
+        provider_pin=tuple(upstream.provider_pin or []),
     )
 
 
