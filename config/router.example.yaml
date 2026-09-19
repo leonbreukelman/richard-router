@@ -84,6 +84,16 @@ virtual_models:
         priority: 1
         weight: 30
 
+      - name: openrouter-relace-pin
+        provider: openrouter
+        # Colon-route form is a SOFT hint; to hard-pin (honors guardrails) use
+        # provider_pin instead:
+        #   model: deepseek/deepseek-v4-flash-0731
+        #   provider_pin: [relace]     # injects {"provider": {"only": ["relace"]}}
+        model: deepseek/deepseek-v4-flash-0731
+        priority: 1
+        weight: 30
+
       # --- Fallback tier (priority 2) ---
       # Only tried if all priority-1 upstreams are unhealthy.
       # Weight defaults to 100 when omitted.
